@@ -21,13 +21,24 @@ public class MazeGenerator : MonoBehaviour
     [SerializeField] private Transform playerTransform;
     [SerializeField] private float playerSpawnHeight = 0.5f;
 
-    [Header("Pistas Visuales en el Camino (SignPost y Fence Post)")]
+    [Header("Pistas Visuales (1 SignPost por cada Cuarto del Mapa)")]
+    [Tooltip("Arrastra aquí tu prefab de SignPost (se pondrán solo 4 en todo el mapa, 1 por cada cuarto)")]
     [SerializeField] private GameObject signPostPrefab;
     [SerializeField] private float signPostRotationOffset = 0f;
+    [Tooltip("Cantidad total de SignPosts en todo el camino (4 = uno en cada cuarto del mapa)")]
+    [SerializeField] private int totalSignPosts = 4;
     [SerializeField] private GameObject fencePostPrefab;
-    [SerializeField] private int fencePostInterval = 3;
+    [SerializeField] private int fencePostInterval = 5;
 
-    [Header("Edificio en la Salida y Victoria")]
+    [Header("Zona Segura a Mitad del Laberinto (Street Light)")]
+    [Tooltip("Arrastra aquí tu prefab de Street Light (se colocará uno solo en toda la mitad del laberinto)")]
+    [SerializeField] private GameObject streetLightPrefab;
+    [Tooltip("Radio en metros alrededor del Street Light donde los monstruos solo acechan y no pueden atacarte ni spawnear")]
+    [SerializeField] private float safeZoneRadius = 3.5f;
+    [SerializeField] private Color streetLightColor = new Color(1f, 0.82f, 0.45f, 1f);
+    [SerializeField] private float streetLightIntensity = 4.5f;
+
+    [Header("Edificio en la Salida y Panel de Victoria (Canvas)")]
     [Tooltip("Arrastra aquí tu prefab de Building para que aparezca en la salida")]
     [SerializeField] private GameObject exitBuildingPrefab;
     [Tooltip("Distancia hacia afuera del hueco de salida donde se coloca el Building")]
@@ -36,9 +47,11 @@ public class MazeGenerator : MonoBehaviour
     [SerializeField] private float buildingRotationY = 180f;
     [Tooltip("Distancia a la que la pantalla empieza a brillar en blanco (10 metros)")]
     [SerializeField] private float brightenStartDistance = 10f;
-    [Tooltip("Distancia a la que la pantalla queda 100% blanca y ganas (2 metros)")]
+    [Tooltip("Distancia a la que llegas a la cabaña y ganas (2 metros)")]
     [SerializeField] private float winDistance = 2f;
-    [Tooltip("Opcional: Nombre de otra escena de Unity para cargar al ganar. Si lo dejas vacío, muestra la pantalla de Victoria integrada.")]
+    [Tooltip("Arrastra aquí el Panel de Victoria que creaste dentro de tu Canvas")]
+    [SerializeField] private GameObject victoryCanvasPanel;
+    [Tooltip("Opcional: Nombre de otra escena si prefieres cargar una escena distinta al ganar")]
     [SerializeField] private string victorySceneName = "";
 
     [Header("Foco de Luz en la Salida")]
@@ -62,9 +75,18 @@ public class MazeGenerator : MonoBehaviour
     private bool hasWon = false;
     private Texture2D whiteOverlayTex;
 
+    public Vector3 SafeZoneCenter { get; private set; }
+    public float SafeZoneRadius => safeZoneRadius;
+    public bool HasSafeZone { get; private set; }
+
     private void Awake()
     {
         Instance = this;
+
+        if (victoryCanvasPanel != null)
+        {
+            victoryCanvasPanel.SetActive(false);
+        }
     }
 
     private void Start()
@@ -90,15 +112,102 @@ public class MazeGenerator : MonoBehaviour
         UpdateExitBrightnessAndVictory();
     }
 
+    // Devuelve true si la posición dada está dentro del radio de 3m del Street Light central
+    public bool IsPositionInSafeZone(Vector3 worldPos, float extraMargin = 0f)
+    {
+        if (!HasSafeZone) return false;
+        Vector2 flatPos = new Vector2(worldPos.x, worldPos.z);
+        Vector2 flatSafe = new Vector2(SafeZoneCenter.x, SafeZoneCenter.z);
+        return Vector2.Distance(flatPos, flatSafe) <= (safeZoneRadius + extraMargin);
+    }
+
+    public bool IsPlayerInSafeZone()
+    {
+        if (playerTransform == null) return false;
+        return IsPositionInSafeZone(playerTransform.position, 0f);
+    }
+
+    // Devuelve en qué cuarto del mapa (0, 1, 2 o 3) se encuentra el jugador siguiendo la ruta de escape
+    public int GetPlayerQuarterIndex(Vector3 playerWorldPos)
+    {
+        int closestIdx = GetClosestEscapePathIndex(playerWorldPos);
+        if (escapePathCells.Count <= 1) return 0;
+
+        float progress = (float)closestIdx / (escapePathCells.Count - 1);
+        return Mathf.Clamp(Mathf.FloorToInt(progress * 4f), 0, 3);
+    }
+
+    public int GetClosestEscapePathIndex(Vector3 worldPos)
+    {
+        if (escapePathCells == null || escapePathCells.Count == 0) return 0;
+
+        int bestIndex = 0;
+        float bestDistSq = float.MaxValue;
+
+        for (int i = 0; i < escapePathCells.Count; i++)
+        {
+            Vector3 diff = escapePathCells[i].transform.position - worldPos;
+            diff.y = 0f;
+            float dSq = diff.sqrMagnitude;
+            if (dSq < bestDistSq)
+            {
+                bestDistSq = dSq;
+                bestIndex = i;
+            }
+        }
+        return bestIndex;
+    }
+
+    // Obtiene una celda sobre el camino principal por delante del jugador (o en la mitad del mapa)
+    public Vector3 GetSpawnPointAheadOfPlayer(Vector3 playerWorldPos, int minCellsAhead, int maxCellsAhead)
+    {
+        if (escapePathCells == null || escapePathCells.Count == 0)
+        {
+            return new Vector3((mazeWidth * 0.5f) * cellSize, 0f, (mazeDepth * 0.5f) * cellSize);
+        }
+
+        int currentIndex = GetClosestEscapePathIndex(playerWorldPos);
+        int offset = Random.Range(minCellsAhead, maxCellsAhead + 1);
+        int targetIndex = Mathf.Clamp(currentIndex + offset, 0, escapePathCells.Count - 1);
+
+        // Evitamos spawnear justo encima del Street Light de la zona segura
+        Vector3 candidate = escapePathCells[targetIndex].transform.position;
+        if (IsPositionInSafeZone(candidate, 1.5f) && targetIndex + 2 < escapePathCells.Count)
+        {
+            candidate = escapePathCells[targetIndex + 2].transform.position;
+        }
+        return candidate;
+    }
+
+    // Obtiene una celda sobre el camino principal a la espalda del jugador
+    public Vector3 GetSpawnPointBehindPlayer(Vector3 playerWorldPos, int minCellsBehind, int maxCellsBehind)
+    {
+        if (escapePathCells == null || escapePathCells.Count == 0)
+        {
+            return Vector3.zero;
+        }
+
+        int currentIndex = GetClosestEscapePathIndex(playerWorldPos);
+        int offset = Random.Range(minCellsBehind, maxCellsBehind + 1);
+        int targetIndex = Mathf.Clamp(currentIndex - offset, 0, escapePathCells.Count - 1);
+
+        // Si el jugador está muy cerca del inicio (0,0), buscamos una celda vecina detrás o a un costado a distancia segura
+        if (targetIndex == currentIndex)
+        {
+            targetIndex = Mathf.Clamp(currentIndex + minCellsBehind, 0, escapePathCells.Count - 1);
+        }
+
+        Vector3 candidate = escapePathCells[targetIndex].transform.position;
+        if (IsPositionInSafeZone(candidate, 1.5f) && targetIndex - 2 >= 0)
+        {
+            candidate = escapePathCells[targetIndex - 2].transform.position;
+        }
+        return candidate;
+    }
+
     private void UpdateExitBrightnessAndVictory()
     {
-        if (playerTransform == null) return;
-
-        if (hasWon)
-        {
-            whiteScreenAlpha = 1f;
-            return;
-        }
+        if (playerTransform == null || hasWon) return;
 
         Vector3 playerFlat = new Vector3(playerTransform.position.x, 0f, playerTransform.position.z);
         Vector3 exitFlat = new Vector3(exitPortalPosition.x, 0f, exitPortalPosition.z);
@@ -109,7 +218,6 @@ public class MazeGenerator : MonoBehaviour
             float t = Mathf.InverseLerp(brightenStartDistance, winDistance, distToExit);
             whiteScreenAlpha = Mathf.Clamp01(Mathf.Pow(t, 1.3f));
 
-            // Disipamos la niebla oscura al acercarnos para que la cabaña se vea nítida e iluminada
             RenderSettings.fogDensity = Mathf.Lerp(0.22f, 0.02f, t);
 
             if (exitMainLight != null)
@@ -136,9 +244,7 @@ public class MazeGenerator : MonoBehaviour
     private void TriggerVictory()
     {
         hasWon = true;
-        whiteScreenAlpha = 1f;
 
-        // Eliminamos a todos los goblins para que no te ataquen en la pantalla de victoria
         GoblinSpawner spawner = GetComponent<GoblinSpawner>();
         if (spawner != null)
         {
@@ -146,17 +252,29 @@ public class MazeGenerator : MonoBehaviour
             spawner.enabled = false;
         }
 
-        // Desactivamos el movimiento del jugador y liberamos el cursor del ratón
         FirstPersonWalker walker = playerTransform.GetComponent<FirstPersonWalker>();
         if (walker != null) walker.enabled = false;
 
         ParabolicRockThrower thrower = playerTransform.GetComponent<ParabolicRockThrower>();
         if (thrower != null) thrower.enabled = false;
 
+        EnemyProximityArcIndicator arcIndicator = playerTransform.GetComponent<EnemyProximityArcIndicator>();
+        if (arcIndicator != null) arcIndicator.enabled = false;
+
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
 
-        // Si configuraste el nombre de una escena externa en el Inspector, la carga
+        if (victoryCanvasPanel != null)
+        {
+            if (victoryCanvasPanel.transform.root != null)
+            {
+                victoryCanvasPanel.transform.root.gameObject.SetActive(true);
+            }
+            victoryCanvasPanel.SetActive(true);
+            whiteScreenAlpha = 0f;
+            return;
+        }
+
         if (!string.IsNullOrEmpty(victorySceneName))
         {
             SceneManager.LoadScene(victorySceneName);
@@ -165,6 +283,7 @@ public class MazeGenerator : MonoBehaviour
 
     private void OnGUI()
     {
+        if (hasWon && victoryCanvasPanel != null) return;
         if (whiteScreenAlpha <= 0.001f) return;
 
         if (whiteOverlayTex == null)
@@ -174,40 +293,8 @@ public class MazeGenerator : MonoBehaviour
             whiteOverlayTex.Apply();
         }
 
-        // Dibuja el resplandor blanco en toda la pantalla según tu cercanía (de 10m a 2m)
         GUI.color = new Color(1f, 1f, 1f, whiteScreenAlpha);
         GUI.DrawTexture(new Rect(0f, 0f, Screen.width, Screen.height), whiteOverlayTex);
-
-        // Cuando llegas a los 2 metros (pantalla 100% blanca), muestra la escena de "¡GANASTE!"
-        if (hasWon && string.IsNullOrEmpty(victorySceneName))
-        {
-            GUIStyle titleStyle = new GUIStyle(GUI.skin.label)
-            {
-                alignment = TextAnchor.MiddleCenter,
-                fontSize = 48,
-                fontStyle = FontStyle.Bold
-            };
-            titleStyle.normal.textColor = new Color(0.08f, 0.12f, 0.18f, 1f);
-
-            GUIStyle subStyle = new GUIStyle(GUI.skin.label)
-            {
-                alignment = TextAnchor.MiddleCenter,
-                fontSize = 20
-            };
-            subStyle.normal.textColor = new Color(0.2f, 0.25f, 0.32f, 1f);
-
-            float centerY = Screen.height * 0.4f;
-            GUI.color = Color.white;
-            GUI.Label(new Rect(0f, centerY - 50f, Screen.width, 70f), "¡GANASTE!", titleStyle);
-            GUI.Label(new Rect(0f, centerY + 20f, Screen.width, 40f), "Lograste encontrar el refugio y escapar del bosque invernal.", subStyle);
-
-            float btnWidth = 220f;
-            float btnHeight = 45f;
-            if (GUI.Button(new Rect((Screen.width - btnWidth) * 0.5f, centerY + 85f, btnWidth, btnHeight), "Jugar de Nuevo"))
-            {
-                SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);
-            }
-        }
     }
 
     private void ApplyPitchBlackAtmosphere()
@@ -253,7 +340,6 @@ public class MazeGenerator : MonoBehaviour
                 newCell.name = $"MazeCell_{x}_{z}";
                 newCell.Initialize(x, z);
 
-                // Dejamos libre de muro negro la zona de la salida (esquina superior derecha) para que no tape la cabaña
                 bool isExitZone = (x >= mazeWidth - 2 && z == mazeDepth - 1);
 
                 bool isNorthBorder = (z == mazeDepth - 1) && !isExitZone;
@@ -303,7 +389,7 @@ public class MazeGenerator : MonoBehaviour
             mazeGrid[mazeWidth - 1, mazeDepth - 1].ClearWestWall();
         }
 
-        SpawnStrategicWaypoints();
+        SpawnQuarterSignPostsAndMidSafeZone();
         CreateExitBeaconAndBuilding();
         CreateDebugPathLine();
 
@@ -334,39 +420,76 @@ public class MazeGenerator : MonoBehaviour
         escapePathPositions.Add(exitPoint);
     }
 
-    private void SpawnStrategicWaypoints()
+    private void SpawnQuarterSignPostsAndMidSafeZone()
     {
-        if (escapePathCells.Count < 2) return;
+        if (escapePathCells.Count < 4) return;
 
-        GameObject waypointsParent = new GameObject("StrategicWaypoints");
+        GameObject waypointsParent = new GameObject("StrategicWaypointsAndSafeZone");
         waypointsParent.transform.SetParent(transform);
 
-        for (int i = 0; i < escapePathCells.Count - 1; i++)
+        int pathCount = escapePathCells.Count;
+
+        // 1. Crear el único Street Light (Zona Segura) exactamente en la mitad del camino del laberinto
+        int midIndex = pathCount / 2;
+        MazeCell midCell = escapePathCells[midIndex];
+        SafeZoneCenter = midCell.transform.position;
+        HasSafeZone = true;
+
+        if (streetLightPrefab != null)
         {
-            MazeCell current = escapePathCells[i];
-            MazeCell next = escapePathCells[i + 1];
+            Vector3 nextDir = (midIndex + 1 < pathCount)
+                ? (escapePathCells[midIndex + 1].transform.position - midCell.transform.position).normalized
+                : Vector3.forward;
+            Vector3 sideOffset = Vector3.Cross(Vector3.up, nextDir) * (cellSize * 0.22f);
 
-            Vector3 dirToNext = (next.transform.position - current.transform.position).normalized;
+            GameObject streetLightObj = Instantiate(
+                streetLightPrefab,
+                SafeZoneCenter + sideOffset,
+                Quaternion.identity,
+                waypointsParent.transform
+            );
+            streetLightObj.name = "MidMaze_StreetLight_SafeZone";
 
-            bool isCornerTurn = (i == 0);
-            if (i > 0)
+            // Luz cálida protectora sobre la Zona Segura (cubre el radio de ~3.5m)
+            GameObject safeLightObj = new GameObject("SafeZoneWarmLight");
+            safeLightObj.transform.SetParent(streetLightObj.transform);
+            safeLightObj.transform.localPosition = new Vector3(0f, 3.2f, 0f);
+
+            Light safeLight = safeLightObj.AddComponent<Light>();
+            safeLight.type = LightType.Point;
+            safeLight.color = streetLightColor;
+            safeLight.range = safeZoneRadius * 2.2f;
+            safeLight.intensity = streetLightIntensity;
+            safeLight.shadows = LightShadows.Soft;
+        }
+
+        // 2. Colocar únicamente 4 SignPosts (1 en cada cuarto del camino de escape)
+        if (signPostPrefab != null && totalSignPosts > 0)
+        {
+            int signsToSpawn = Mathf.Min(totalSignPosts, pathCount - 1);
+            for (int q = 0; q < signsToSpawn; q++)
             {
-                MazeCell prev = escapePathCells[i - 1];
-                Vector3 dirFromPrev = (current.transform.position - prev.transform.position).normalized;
-                if (Vector3.Dot(dirFromPrev, dirToNext) < 0.5f)
+                // Ubicamos cada SignPost al ~15%, ~38%, ~62% y ~85% del camino (uno por cada cuarto)
+                float normalizedPos = (q + 0.5f) / signsToSpawn;
+                int targetIdx = Mathf.Clamp(Mathf.RoundToInt(normalizedPos * (pathCount - 2)), 0, pathCount - 2);
+
+                // Si a 1 o 2 celdas hay un giro de esquina, preferimos poner el cartel justo en esa esquina
+                int chosenIdx = FindNearestCornerIndex(targetIdx, 2);
+                if (chosenIdx == midIndex && chosenIdx + 1 < pathCount - 1)
                 {
-                    isCornerTurn = true;
+                    chosenIdx++;
                 }
-            }
 
-            if (isCornerTurn && signPostPrefab != null && i % 2 == 0)
-            {
+                MazeCell current = escapePathCells[chosenIdx];
+                MazeCell next = escapePathCells[chosenIdx + 1];
+                Vector3 dirToNext = (next.transform.position - current.transform.position).normalized;
+
                 Vector3 sideOffset = Vector3.Cross(Vector3.up, dirToNext) * (cellSize * 0.24f);
                 Vector3 signPos = current.transform.position + sideOffset;
 
                 Quaternion signRot = Quaternion.LookRotation(dirToNext) * Quaternion.Euler(0f, signPostRotationOffset, 0f);
                 GameObject signObj = Instantiate(signPostPrefab, signPos, signRot, waypointsParent.transform);
-                signObj.name = $"SignPost_Step_{i}";
+                signObj.name = $"SignPost_Quarter_{q + 1}";
 
                 GameObject signLightObj = new GameObject("SignWarmGlow");
                 signLightObj.transform.SetParent(signObj.transform);
@@ -377,8 +500,18 @@ public class MazeGenerator : MonoBehaviour
                 warmLight.range = 3.2f;
                 warmLight.intensity = 1.1f;
             }
-            else if (fencePostPrefab != null && i > 0 && i % fencePostInterval == 0)
+        }
+
+        // 3. Fence Posts opcionales espaciados
+        if (fencePostPrefab != null && fencePostInterval > 0)
+        {
+            for (int i = fencePostInterval; i < pathCount - 1; i += fencePostInterval)
             {
+                if (i == midIndex) continue;
+                MazeCell current = escapePathCells[i];
+                MazeCell next = escapePathCells[i + 1];
+                Vector3 dirToNext = (next.transform.position - current.transform.position).normalized;
+
                 Vector3 sideOffset = -Vector3.Cross(Vector3.up, dirToNext) * (cellSize * 0.26f);
                 Vector3 fencePos = current.transform.position + sideOffset;
                 Quaternion fenceRot = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
@@ -387,6 +520,29 @@ public class MazeGenerator : MonoBehaviour
                 fenceObj.name = $"FencePost_Step_{i}";
             }
         }
+    }
+
+    private int FindNearestCornerIndex(int centerIdx, int searchRadius)
+    {
+        int pathCount = escapePathCells.Count;
+        for (int offset = 0; offset <= searchRadius; offset++)
+        {
+            int idxPlus = centerIdx + offset;
+            if (idxPlus > 0 && idxPlus < pathCount - 1 && IsCornerCell(idxPlus))
+                return idxPlus;
+
+            int idxMinus = centerIdx - offset;
+            if (idxMinus > 0 && idxMinus < pathCount - 1 && IsCornerCell(idxMinus))
+                return idxMinus;
+        }
+        return centerIdx;
+    }
+
+    private bool IsCornerCell(int idx)
+    {
+        Vector3 dirIn = (escapePathCells[idx].transform.position - escapePathCells[idx - 1].transform.position).normalized;
+        Vector3 dirOut = (escapePathCells[idx + 1].transform.position - escapePathCells[idx].transform.position).normalized;
+        return Vector3.Dot(dirIn, dirOut) < 0.5f;
     }
 
     public Vector3 GetNextPathStep(Vector3 fromWorldPos, Vector3 targetWorldPos)
@@ -465,7 +621,6 @@ public class MazeGenerator : MonoBehaviour
         Vector3 exitCellCenter = mazeGrid[mazeWidth - 1, mazeDepth - 1].transform.position;
         exitPortalPosition = exitCellCenter + new Vector3(0f, 0f, cellSize * 0.5f);
 
-        // 1. Instanciar el Building justo frente al umbral de salida
         if (exitBuildingPrefab != null)
         {
             Vector3 buildingPos = exitCellCenter + new Vector3(0f, 0f, buildingForwardOffset);
@@ -474,7 +629,6 @@ public class MazeGenerator : MonoBehaviour
             buildingObj.name = "ExitSafeBuilding";
         }
 
-        // 2. Crear el foco de luz potente y el haz vertical
         GameObject beaconObj = new GameObject("ExitLightBeacon");
         beaconObj.transform.SetParent(transform);
         beaconObj.transform.position = exitPortalPosition;
@@ -543,7 +697,8 @@ public class MazeGenerator : MonoBehaviour
         debugPathRenderer.endColor = debugPathColor;
         debugPathRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
         debugPathRenderer.receiveShadows = false;
-        debugPathRenderer.enabled = showEscapePathInGame;
+        debugPathRenderer.enabled = false;
+        showEscapePathInGame = false;
     }
 
     private MazeCell GetRandomUnvisitedNeighbor(MazeCell cell)
@@ -599,6 +754,12 @@ public class MazeGenerator : MonoBehaviour
         {
             Gizmos.DrawLine(escapePathPositions[i], escapePathPositions[i + 1]);
             Gizmos.DrawSphere(escapePathPositions[i], 0.2f);
+        }
+
+        if (HasSafeZone)
+        {
+            Gizmos.color = new Color(1f, 0.85f, 0.3f, 0.4f);
+            Gizmos.DrawWireSphere(SafeZoneCenter, safeZoneRadius);
         }
     }
 }

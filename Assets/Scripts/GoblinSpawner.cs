@@ -4,47 +4,55 @@ using UnityEngine;
 
 public class GoblinSpawner : MonoBehaviour
 {
-    [Header("Prefabs de tu Low Poly Goblin Pack")]
+    [Header("Prefabs de tus Enemigos")]
     [SerializeField] private GameObject[] goblinPrefabs;
 
     [Header("Referencias")]
     [SerializeField] private Transform playerTransform;
-    [SerializeField] private float cellSize = 4f;
-    [SerializeField] private int mazeWidth = 15;
-    [SerializeField] private int mazeDepth = 15;
 
-    [Header("Distancias y Tiempos de Aparición")]
-    [SerializeField] private int maxActiveGoblins = 6;
-    [SerializeField] private float spawnInterval = 4f;
-    [SerializeField] private float minSpawnDistance = 10f;
-    [SerializeField] private float maxSpawnDistance = 22f;
-    [SerializeField] private float relocateDistance = 30f;
+    [Header("Spawneo por Cuartos del Mapa (4 Segmentos)")]
+    [Tooltip("Segundos tras entrar a un segmento para que spawnee el monstruo frontal (que viene desde adelante hacia ti)")]
+    [SerializeField] private float frontEnemySpawnDelay = 3.0f;
+    [Tooltip("Segundos adicionales después de entrar al segmento para que spawnee el segundo monstruo a tu espalda")]
+    [SerializeField] private float rearEnemySpawnDelay = 7.5f;
+    [Tooltip("Si lo marcas, en el primer cuarto (segmento 0) solo sale 1 monstruo; si lo desmarcas, salen los 2 (frente y espalda) desde el primer cuarto")]
+    [SerializeField] private bool onlyOneEnemyInFirstQuarter = false;
 
-    [Header("Ajustes de los Goblins")]
+    [Header("Ajustes de los Enemigos y Acecho")]
     [SerializeField] private float goblinSpeed = 2.1f;
     [SerializeField] private float goblinStunDuration = 4.5f;
     [SerializeField] private float goblinScale = 0.85f;
+    [Tooltip("Segundos que cada monstruo acecha (por delante o por detrás) antes de lanzarse a cazarte")]
+    [SerializeField] private float stalkDuration = 8f;
+    [Tooltip("Brillo del material del enemigo (1 = normal, 0.25 = muy oscuro)")]
+    [Range(0.05f, 1f)]
+    [SerializeField] private float enemyBrightness = 0.25f;
 
-    [Header("Sonidos de los Goblins (.mp3)")]
-    [Tooltip("Arrastra aquí el .mp3 que hacen los goblins al caminar/acechar")]
+    [Header("Encuadre y Duración del Jumpscare (Fondo Negro)")]
+    [SerializeField] private float jumpscareCameraHeight = 1.45f;
+    [SerializeField] private float jumpscareDistance = 1.75f;
+    [SerializeField] private float jumpscareDuration = 3.0f;
+
+    [Header("Sonidos de los Enemigos (.mp3)")]
     [SerializeField] private AudioClip goblinAmbientMp3;
-    [Tooltip("Radio en metros desde el que se empieza a escuchar al goblin")]
     [SerializeField] private float goblinHearingRadius = 11f;
     [Range(0f, 1f)]
     [SerializeField] private float goblinAmbientVolume = 0.8f;
 
-    [Tooltip("Arrastra aquí el .mp3 de susto cuando el goblin te atrapa")]
     [SerializeField] private AudioClip goblinCatchMp3;
     [Range(0f, 1f)]
     [SerializeField] private float goblinCatchVolume = 1.0f;
 
     [Header("Truco de Desarrollo (Desmarcar para el Juego Final)")]
-    [Tooltip("Si está activo, pulsar F2 elimina a los Goblins y detiene su aparición")]
     [SerializeField] private bool allowDebugCheatF2 = true;
     private bool spawningDisabledByCheat = false;
 
     private List<GoblinEnemy> activeGoblins = new List<GoblinEnemy>();
-    private float spawnTimer = 2.5f;
+
+    private int currentSegment = -1;
+    private float timeInCurrentSegment = 0f;
+    private bool frontSpawnedInSegment = false;
+    private bool rearSpawnedInSegment = false;
 
     private void Start()
     {
@@ -68,51 +76,80 @@ public class GoblinSpawner : MonoBehaviour
 
         if (spawningDisabledByCheat) return;
         if (playerTransform == null || goblinPrefabs == null || goblinPrefabs.Length == 0) return;
+        if (MazeGenerator.Instance == null) return;
 
-        if (activeGoblins.Count < maxActiveGoblins)
+        // Limpiamos referencias nulas de enemigos que ya hicieron despawn
+        activeGoblins.RemoveAll(g => g == null);
+
+        // 1. Detectamos en qué cuarto del mapa (0, 1, 2 o 3) está el jugador ahora mismo
+        int playerQuarter = MazeGenerator.Instance.GetPlayerQuarterIndex(playerTransform.position);
+
+        if (playerQuarter != currentSegment)
         {
-            spawnTimer -= Time.deltaTime;
-            if (spawnTimer <= 0f)
-            {
-                SpawnGoblinAroundPlayer();
-                spawnTimer = spawnInterval;
-            }
+            OnPlayerChangedSegment(playerQuarter);
         }
 
+        // 2. Si el jugador está dentro de la Zona Segura (Street Light central), pausamos el temporizador de spawneo
+        if (MazeGenerator.Instance.IsPlayerInSafeZone())
+        {
+            return;
+        }
+
+        // 3. Avanzamos el reloj del segmento actual y spawneamos el enemigo frontal y el trasero a sus segundos correspondientes
+        timeInCurrentSegment += Time.deltaTime;
+
+        if (!frontSpawnedInSegment && timeInCurrentSegment >= frontEnemySpawnDelay)
+        {
+            SpawnSegmentEnemy(GoblinEnemy.StalkDirectionRole.FrontApproacher, currentSegment);
+            frontSpawnedInSegment = true;
+        }
+
+        bool allowSecondEnemy = !(onlyOneEnemyInFirstQuarter && currentSegment == 0);
+        if (allowSecondEnemy && !rearSpawnedInSegment && timeInCurrentSegment >= rearEnemySpawnDelay)
+        {
+            SpawnSegmentEnemy(GoblinEnemy.StalkDirectionRole.RearStalker, currentSegment);
+            rearSpawnedInSegment = true;
+        }
+    }
+
+    private void OnPlayerChangedSegment(int newQuarter)
+    {
+        currentSegment = newQuarter;
+        timeInCurrentSegment = 0f;
+        frontSpawnedInSegment = false;
+        rearSpawnedInSegment = false;
+
+        // Todos los enemigos de segmentos anteriores dejan de perseguirte (se quedan quietos y hacen despawn cuando no los miras)
         for (int i = 0; i < activeGoblins.Count; i++)
         {
             GoblinEnemy goblin = activeGoblins[i];
-            if (goblin == null || goblin.IsStunned) continue;
-
-            float dist = Vector3.Distance(playerTransform.position, goblin.transform.position);
-            if (dist > relocateDistance && TryFindValidCellAroundPlayer(out Vector3 newCellPos))
+            if (goblin != null && goblin.AssignedQuarter != newQuarter)
             {
-                goblin.transform.position = newCellPos;
+                goblin.MarkAsOutOfSegment();
             }
         }
     }
 
-    public void ClearAllActiveGoblins()
+    private void SpawnSegmentEnemy(GoblinEnemy.StalkDirectionRole role, int quarterIndex)
     {
-        for (int i = 0; i < activeGoblins.Count; i++)
+        Vector3 spawnPos;
+
+        if (role == GoblinEnemy.StalkDirectionRole.FrontApproacher)
         {
-            if (activeGoblins[i] != null)
-            {
-                Destroy(activeGoblins[i].gameObject);
-            }
+            // Spawnea más adelante en el mapa (hacia la mitad/salida) y se dirige hacia el jugador
+            spawnPos = MazeGenerator.Instance.GetSpawnPointAheadOfPlayer(playerTransform.position, 5, 9);
         }
-        activeGoblins.Clear();
-    }
-
-    private void SpawnGoblinAroundPlayer()
-    {
-        if (!TryFindValidCellAroundPlayer(out Vector3 spawnPos)) return;
+        else
+        {
+            // Spawnea unos segundos después a la espalda del jugador en el camino recorrido
+            spawnPos = MazeGenerator.Instance.GetSpawnPointBehindPlayer(playerTransform.position, 4, 7);
+        }
 
         GameObject chosenPrefab = goblinPrefabs[Random.Range(0, goblinPrefabs.Length)];
         if (chosenPrefab == null) return;
 
         GameObject goblinObj = Instantiate(chosenPrefab, spawnPos, Quaternion.identity, transform);
-        goblinObj.name = $"GoblinHunter_{activeGoblins.Count + 1}";
+        goblinObj.name = $"Enemy_Q{quarterIndex + 1}_{role}";
         goblinObj.transform.localScale = Vector3.one * goblinScale;
 
         GoblinEnemy enemyScript = goblinObj.GetComponent<GoblinEnemy>();
@@ -129,30 +166,29 @@ public class GoblinSpawner : MonoBehaviour
             goblinHearingRadius,
             goblinAmbientVolume,
             goblinCatchMp3,
-            goblinCatchVolume
+            goblinCatchVolume,
+            quarterIndex,
+            role,
+            jumpscareCameraHeight,
+            jumpscareDistance,
+            jumpscareDuration,
+            stalkDuration,
+            enemyBrightness
         );
+
         activeGoblins.Add(enemyScript);
     }
 
-    private bool TryFindValidCellAroundPlayer(out Vector3 validPosition)
+    public void ClearAllActiveGoblins()
     {
-        for (int attempt = 0; attempt < 30; attempt++)
+        for (int i = 0; i < activeGoblins.Count; i++)
         {
-            int randomX = Random.Range(0, mazeWidth);
-            int randomZ = Random.Range(0, mazeDepth);
-
-            Vector3 candidatePos = new Vector3(randomX * cellSize, 0f, randomZ * cellSize);
-            float distToPlayer = Vector3.Distance(playerTransform.position, candidatePos);
-
-            if (distToPlayer >= minSpawnDistance && distToPlayer <= maxSpawnDistance)
+            if (activeGoblins[i] != null)
             {
-                validPosition = candidatePos;
-                return true;
+                Destroy(activeGoblins[i].gameObject);
             }
         }
-
-        validPosition = Vector3.zero;
-        return false;
+        activeGoblins.Clear();
     }
 
     private void OnGUI()
@@ -160,7 +196,7 @@ public class GoblinSpawner : MonoBehaviour
         if (allowDebugCheatF2 && spawningDisabledByCheat)
         {
             GUI.color = Color.yellow;
-            GUI.Label(new Rect(15f, 15f, 350f, 30f), "[TRUCO F2 ACTIVO] Goblins Desactivados");
+            GUI.Label(new Rect(15f, 15f, 350f, 30f), "[TRUCO F2 ACTIVO] Enemigos Desactivados");
         }
     }
 }
