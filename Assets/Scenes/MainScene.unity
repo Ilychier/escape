@@ -421,7 +421,7 @@ MonoBehaviour:
   animationSpeed: 12
   normalColor: {r: 0.85, g: 0.12, b: 0.12, a: 1}
   hoverColor: {r: 1, g: 0.25, b: 0.25, a: 1}
-  pressedColor: {r: 1, g: 0.85, b: 0.3, a: 1}
+  pressedColor: {r: 1, g: 1, b: 1, a: 1}
 --- !u!114 &346635140
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -666,7 +666,7 @@ MonoBehaviour:
   animationSpeed: 12
   normalColor: {r: 0.85, g: 0.12, b: 0.12, a: 1}
   hoverColor: {r: 1, g: 0.25, b: 0.25, a: 1}
-  pressedColor: {r: 1, g: 0.85, b: 0.3, a: 1}
+  pressedColor: {r: 1, g: 1, b: 1, a: 1}
 --- !u!1 &437025124
 GameObject:
   m_ObjectHideFlags: 0
@@ -1059,7 +1059,7 @@ MonoBehaviour:
   animationSpeed: 12
   normalColor: {r: 0.85, g: 0.12, b: 0.12, a: 1}
   hoverColor: {r: 1, g: 0.25, b: 0.25, a: 1}
-  pressedColor: {r: 1, g: 0.85, b: 0.3, a: 1}
+  pressedColor: {r: 1, g: 1, b: 1, a: 1}
 --- !u!114 &693521982
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1297,6 +1297,8 @@ MonoBehaviour:
   mazeWidth: 30
   mazeDepth: 30
   cellSize: 4
+  deadEndRemovalRatio: 0.6
+  guaranteedCyclesPerQuadrant: 8
   useFixedSeed: 0
   seed: 12345
   playerTransform: {fileID: 1973995886}
@@ -1304,12 +1306,12 @@ MonoBehaviour:
   signPostPrefab: {fileID: 1892361737580300, guid: 1255157e0357f974da560a578344a022, type: 3}
   signPostRotationOffset: 0
   totalSignPosts: 4
-  fencePostPrefab: {fileID: 1286613287635706, guid: 8a69016242c038a4eaf828484d85e4be, type: 3}
+  fencePostPrefab: {fileID: 1746220295916558, guid: 6ddfb14f0d664064faafaa4497219d2c, type: 3}
   fencePostInterval: 3
   streetLightPrefab: {fileID: 5789896249604009285, guid: 120d7631bf5b4b94f8271411b1868e06, type: 3}
   safeZoneRadius: 3.5
   streetLightColor: {r: 1, g: 0.82, b: 0.45, a: 1}
-  streetLightIntensity: 4.5
+  streetLightIntensity: 10
   exitBuildingPrefab: {fileID: 1372843188443888, guid: 6083fd8d1fc3abe4cba8b091cfdec328, type: 3}
   buildingForwardOffset: 3.5
   buildingRotationY: 90
@@ -1338,13 +1340,14 @@ MonoBehaviour:
   goblinPrefabs:
   - {fileID: 1264443996888144, guid: e57ff2a222c0ed44ea41cc22b40f0b81, type: 3}
   playerTransform: {fileID: 1973995886}
-  frontEnemySpawnDelay: 3
-  rearEnemySpawnDelay: 7.5
-  onlyOneEnemyInFirstQuarter: 1
-  goblinSpeed: 3
-  goblinStunDuration: 4.5
+  initialSpawnDelay: 10
+  maxActiveGoblins: 12
+  spawnInterval: 6
+  minSpawnDistanceFromPlayer: 18
+  goblinChaseSpeed: 3.5
+  goblinStunDuration: 3
+  searchDurationAfterLosingSight: 7.5
   goblinScale: 0.3
-  stalkDuration: 8
   enemyBrightness: 0.1
   jumpscareCameraHeight: 0.7
   jumpscareDistance: 1.4
@@ -6633,7 +6636,7 @@ MonoBehaviour:
   animationSpeed: 12
   normalColor: {r: 0.85, g: 0.12, b: 0.12, a: 1}
   hoverColor: {r: 1, g: 0.25, b: 0.25, a: 1}
-  pressedColor: {r: 1, g: 0.85, b: 0.3, a: 1}
+  pressedColor: {r: 1, g: 1, b: 1, a: 1}
 --- !u!1 &963194225
 GameObject:
   m_ObjectHideFlags: 0
@@ -6692,7 +6695,7 @@ Camera:
     width: 1
     height: 1
   near clip plane: 0.3
-  far clip plane: 1000
+  far clip plane: 25
   field of view: 60
   orthographic: 0
   orthographic size: 5
@@ -6866,6 +6869,7 @@ GameObject:
   - component: {fileID: 1166077147}
   - component: {fileID: 1166077149}
   - component: {fileID: 1166077148}
+  - component: {fileID: 1166077150}
   m_Layer: 5
   m_Name: VictoryPanel
   m_TagString: Untagged
@@ -6934,6 +6938,102 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1166077146}
   m_CullTransparentMesh: 1
+--- !u!82 &1166077150
+AudioSource:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1166077146}
+  m_Enabled: 1
+  serializedVersion: 4
+  OutputAudioMixerGroup: {fileID: 0}
+  m_audioClip: {fileID: 8300000, guid: b0b2e41b2959f2f4ea4512aacc8cf7e4, type: 3}
+  m_PlayOnAwake: 1
+  m_Volume: 1
+  m_Pitch: 1
+  Loop: 0
+  Mute: 0
+  Spatialize: 0
+  SpatializePostEffects: 0
+  Priority: 128
+  DopplerLevel: 1
+  MinDistance: 1
+  MaxDistance: 500
+  Pan2D: 0
+  rolloffMode: 0
+  BypassEffects: 0
+  BypassListenerEffects: 0
+  BypassReverbZones: 0
+  rolloffCustomCurve:
+    serializedVersion: 2
+    m_Curve:
+    - serializedVersion: 3
+      time: 0
+      value: 1
+      inSlope: 0
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0.33333334
+      outWeight: 0.33333334
+    - serializedVersion: 3
+      time: 1
+      value: 0
+      inSlope: 0
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0.33333334
+      outWeight: 0.33333334
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
+  panLevelCustomCurve:
+    serializedVersion: 2
+    m_Curve:
+    - serializedVersion: 3
+      time: 0
+      value: 0
+      inSlope: 0
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0.33333334
+      outWeight: 0.33333334
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
+  spreadCustomCurve:
+    serializedVersion: 2
+    m_Curve:
+    - serializedVersion: 3
+      time: 0
+      value: 0
+      inSlope: 0
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0.33333334
+      outWeight: 0.33333334
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
+  reverbZoneMixCustomCurve:
+    serializedVersion: 2
+    m_Curve:
+    - serializedVersion: 3
+      time: 0
+      value: 1
+      inSlope: 0
+      outSlope: 0
+      tangentMode: 0
+      weightedMode: 0
+      inWeight: 0.33333334
+      outWeight: 0.33333334
+    m_PreInfinity: 2
+    m_PostInfinity: 2
+    m_RotationOrder: 4
 --- !u!1 &1308099524
 GameObject:
   m_ObjectHideFlags: 0
@@ -7466,14 +7566,14 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   walkSpeed: 3
-  runSpeed: 5.4
+  runSpeed: 4.8
   gravity: -15
-  maxRunDuration: 4
+  maxRunDuration: 6
   useTiredAudioLengthAsCooldown: 1
   exhaustedCooldownTime: 4
   staminaRecoverySpeed: 1
   tiredMp3: {fileID: 8300000, guid: ada881ebcfaaab945ae37c697cbcf15f, type: 3}
-  tiredVolume: 0.85
+  tiredVolume: 1
   cameraTransform: {fileID: 963194228}
   mouseSensitivity: 2
   maxLookAngle: 80
@@ -7536,7 +7636,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   customWindClip: {fileID: 0}
-  baseVolume: 0.16
+  baseVolume: 0.052
   gustVolumeBoost: 0.4
   gustSpeed: 0.35
 --- !u!82 &1973995888
@@ -7693,7 +7793,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: a1760e13c7bdf054a87de5ec5347fb08, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  detectionRadius: 14
+  detectionRadius: 10
   showAllNearbyEnemies: 1
   arcColor: {r: 0.78431374, g: 0.078431375, b: 0.078431375, a: 0.9}
   indicatorSize: 360

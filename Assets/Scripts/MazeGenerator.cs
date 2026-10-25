@@ -7,11 +7,24 @@ public class MazeGenerator : MonoBehaviour
 {
     public static MazeGenerator Instance { get; private set; }
 
-    [Header("Configuración del Laberinto")]
+    [Header("Configuración del Laberinto (30x30 = 120x120 metros)")]
     [SerializeField] private MazeCell mazeCellPrefab;
-    [SerializeField] private int mazeWidth = 15;
-    [SerializeField] private int mazeDepth = 15;
+    [SerializeField] private int mazeWidth = 30;
+    [SerializeField] private int mazeDepth = 30;
     [SerializeField] private float cellSize = 4f;
+
+    [Header("Optimización para PC de Baja Gama (Distance Culling)")]
+    [Tooltip("Activa y desactiva automáticamente las celdas lejanas ocultas por la niebla para multiplicar los FPS")]
+    [SerializeField] private bool enableCellDistanceCulling = true;
+    [Tooltip("Distancia en metros alrededor del jugador donde las celdas están encendidas (24m supera el alcance de la niebla)")]
+    [SerializeField] private float activeCellRadius = 24f;
+
+    [Header("Ciclos y Rutas Alternativas (Laberinto No Perfecto)")]
+    [Tooltip("Porcentaje de callejones sin salida que se abren para formar ciclos (0.60 = abre el 60% y conserva el 40% como callejones peligrosos)")]
+    [Range(0f, 0.9f)]
+    [SerializeField] private float deadEndRemovalRatio = 0.60f;
+    [Tooltip("Ciclos estratégicos mínimos garantizados en cada uno de los 4 cuadrantes del mapa")]
+    [SerializeField] private int guaranteedCyclesPerQuadrant = 8;
 
     [Header("Semilla Aleatoria (Opcional)")]
     [SerializeField] private bool useFixedSeed = false;
@@ -21,37 +34,26 @@ public class MazeGenerator : MonoBehaviour
     [SerializeField] private Transform playerTransform;
     [SerializeField] private float playerSpawnHeight = 0.5f;
 
-    [Header("Pistas Visuales (1 SignPost por cada Cuarto del Mapa)")]
-    [Tooltip("Arrastra aquí tu prefab de SignPost (se pondrán solo 4 en todo el mapa, 1 por cada cuarto)")]
+    [Header("Pistas Visuales (SignPosts y Fence Posts)")]
     [SerializeField] private GameObject signPostPrefab;
     [SerializeField] private float signPostRotationOffset = 0f;
-    [Tooltip("Cantidad total de SignPosts en todo el camino (4 = uno en cada cuarto del mapa)")]
     [SerializeField] private int totalSignPosts = 4;
     [SerializeField] private GameObject fencePostPrefab;
-    [SerializeField] private int fencePostInterval = 5;
+    [SerializeField] private int fencePostInterval = 6;
 
-    [Header("Zona Segura a Mitad del Laberinto (Street Light)")]
-    [Tooltip("Arrastra aquí tu prefab de Street Light (se colocará uno solo en toda la mitad del laberinto)")]
+    [Header("Farola Central: Zona Segura (3 metros de radio)")]
     [SerializeField] private GameObject streetLightPrefab;
-    [Tooltip("Radio en metros alrededor del Street Light donde los monstruos solo acechan y no pueden atacarte ni spawnear")]
-    [SerializeField] private float safeZoneRadius = 3.5f;
+    [SerializeField] private float safeZoneRadius = 3.0f;
     [SerializeField] private Color streetLightColor = new Color(1f, 0.82f, 0.45f, 1f);
-    [SerializeField] private float streetLightIntensity = 4.5f;
+    [SerializeField] private float streetLightIntensity = 5.0f;
 
     [Header("Edificio en la Salida y Panel de Victoria (Canvas)")]
-    [Tooltip("Arrastra aquí tu prefab de Building para que aparezca en la salida")]
     [SerializeField] private GameObject exitBuildingPrefab;
-    [Tooltip("Distancia hacia afuera del hueco de salida donde se coloca el Building")]
     [SerializeField] private float buildingForwardOffset = 3.5f;
-    [Tooltip("Giro del Building (usa 0, 90, 180 o -90 para alinear la fachada con el pasillo)")]
     [SerializeField] private float buildingRotationY = 180f;
-    [Tooltip("Distancia a la que la pantalla empieza a brillar en blanco (10 metros)")]
     [SerializeField] private float brightenStartDistance = 10f;
-    [Tooltip("Distancia a la que llegas a la cabaña y ganas (2 metros)")]
     [SerializeField] private float winDistance = 2f;
-    [Tooltip("Arrastra aquí el Panel de Victoria que creaste dentro de tu Canvas")]
     [SerializeField] private GameObject victoryCanvasPanel;
-    [Tooltip("Opcional: Nombre de otra escena si prefieres cargar una escena distinta al ganar")]
     [SerializeField] private string victorySceneName = "";
 
     [Header("Foco de Luz en la Salida")]
@@ -65,6 +67,8 @@ public class MazeGenerator : MonoBehaviour
     [SerializeField] private Color debugPathColor = new Color(0f, 1f, 0.4f, 1f);
 
     private MazeCell[,] mazeGrid;
+    // Máscara de bits de pasillos abiertos en memoria (1=Norte, 2=Sur, 4=Este, 8=Oeste) para que la IA navegue aunque la celda lejana esté oculta por optimización
+    private byte[,] navConnectionsMask;
     private List<MazeCell> escapePathCells = new List<MazeCell>();
     private List<Vector3> escapePathPositions = new List<Vector3>();
     private LineRenderer debugPathRenderer;
@@ -74,10 +78,16 @@ public class MazeGenerator : MonoBehaviour
     private float whiteScreenAlpha = 0f;
     private bool hasWon = false;
     private Texture2D whiteOverlayTex;
+    private float cullingTimer = 0f;
 
+    public int MazeWidth => mazeWidth;
+    public int MazeDepth => mazeDepth;
+    public float CellSize => cellSize;
     public Vector3 SafeZoneCenter { get; private set; }
     public float SafeZoneRadius => safeZoneRadius;
     public bool HasSafeZone { get; private set; }
+    public int TotalCyclesCount { get; private set; }
+    public int RemainingDeadEndsCount { get; private set; }
 
     private void Awake()
     {
@@ -99,6 +109,7 @@ public class MazeGenerator : MonoBehaviour
         }
 
         GenerateMaze();
+        StartCoroutine(EnableGpuInstancingAndInitialCullRoutine());
     }
 
     private void Update()
@@ -109,100 +120,717 @@ public class MazeGenerator : MonoBehaviour
             debugPathRenderer.enabled = showEscapePathInGame;
         }
 
+        if (enableCellDistanceCulling && playerTransform != null && !hasWon)
+        {
+            cullingTimer -= Time.deltaTime;
+            if (cullingTimer <= 0f)
+            {
+                UpdateCellDistanceCulling();
+                cullingTimer = 0.25f;
+            }
+        }
+
         UpdateExitBrightnessAndVictory();
     }
 
-    // Devuelve true si la posición dada está dentro del radio de 3m del Street Light central
-    public bool IsPositionInSafeZone(Vector3 worldPos, float extraMargin = 0f)
+    private IEnumerator EnableGpuInstancingAndInitialCullRoutine()
+    {
+        // Esperamos un fotograma a que los decoradores de paredes instancien sus árboles y activamos GPU Instancing por código en todos sus materiales
+        yield return null;
+
+        Renderer[] allRenderers = GetComponentsInChildren<Renderer>(true);
+        foreach (Renderer rend in allRenderers)
+        {
+            if (rend == null || rend.sharedMaterials == null) continue;
+            foreach (Material sharedMat in rend.sharedMaterials)
+            {
+                if (sharedMat != null)
+                {
+                    sharedMat.enableInstancing = true;
+                }
+            }
+        }
+
+        if (enableCellDistanceCulling)
+        {
+            UpdateCellDistanceCulling();
+        }
+    }
+
+    private void UpdateCellDistanceCulling()
+    {
+        if (mazeGrid == null || playerTransform == null) return;
+
+        Vector3 pPos = playerTransform.position;
+        float radiusSq = activeCellRadius * activeCellRadius;
+
+        for (int x = 0; x < mazeWidth; x++)
+        {
+            float dx = (x * cellSize) - pPos.x;
+            float dxSq = dx * dx;
+
+            for (int z = 0; z < mazeDepth; z++)
+            {
+                MazeCell cell = mazeGrid[x, z];
+                if (cell == null) continue;
+
+                float dz = (z * cellSize) - pPos.z;
+                bool shouldBeVisible = (dxSq + dz * dz) <= radiusSq;
+
+                if (cell.gameObject.activeSelf != shouldBeVisible)
+                {
+                    cell.gameObject.SetActive(shouldBeVisible);
+                }
+            }
+        }
+    }
+
+    public bool IsPositionInSafeZone3D(Vector3 worldPos, float extraMargin = 0f)
     {
         if (!HasSafeZone) return false;
-        Vector2 flatPos = new Vector2(worldPos.x, worldPos.z);
-        Vector2 flatSafe = new Vector2(SafeZoneCenter.x, SafeZoneCenter.z);
-        return Vector2.Distance(flatPos, flatSafe) <= (safeZoneRadius + extraMargin);
+
+        float clampedY = Mathf.Clamp(worldPos.y, SafeZoneCenter.y - 0.5f, SafeZoneCenter.y + 2.5f);
+        Vector3 referencePoint3D = new Vector3(SafeZoneCenter.x, clampedY, SafeZoneCenter.z);
+
+        float distance3D = Vector3.Distance(worldPos, referencePoint3D);
+        return distance3D <= (safeZoneRadius + extraMargin);
     }
 
     public bool IsPlayerInSafeZone()
     {
         if (playerTransform == null) return false;
-        return IsPositionInSafeZone(playerTransform.position, 0f);
+        return IsPositionInSafeZone3D(playerTransform.position, 0f);
     }
 
-    // Devuelve en qué cuarto del mapa (0, 1, 2 o 3) se encuentra el jugador siguiendo la ruta de escape
-    public int GetPlayerQuarterIndex(Vector3 playerWorldPos)
+    public void GenerateMaze()
     {
-        int closestIdx = GetClosestEscapePathIndex(playerWorldPos);
-        if (escapePathCells.Count <= 1) return 0;
+        mazeGrid = new MazeCell[mazeWidth, mazeDepth];
+        navConnectionsMask = new byte[mazeWidth, mazeDepth];
+        escapePathCells.Clear();
+        escapePathPositions.Clear();
 
-        float progress = (float)closestIdx / (escapePathCells.Count - 1);
-        return Mathf.Clamp(Mathf.FloorToInt(progress * 4f), 0, 3);
-    }
-
-    public int GetClosestEscapePathIndex(Vector3 worldPos)
-    {
-        if (escapePathCells == null || escapePathCells.Count == 0) return 0;
-
-        int bestIndex = 0;
-        float bestDistSq = float.MaxValue;
-
-        for (int i = 0; i < escapePathCells.Count; i++)
+        for (int x = 0; x < mazeWidth; x++)
         {
-            Vector3 diff = escapePathCells[i].transform.position - worldPos;
-            diff.y = 0f;
-            float dSq = diff.sqrMagnitude;
-            if (dSq < bestDistSq)
+            for (int z = 0; z < mazeDepth; z++)
             {
-                bestDistSq = dSq;
-                bestIndex = i;
+                Vector3 position = new Vector3(x * cellSize, 0f, z * cellSize);
+                MazeCell newCell = Instantiate(mazeCellPrefab, position, Quaternion.identity, transform);
+                newCell.name = $"MazeCell_{x}_{z}";
+                newCell.Initialize(x, z);
+
+                bool isExitZone = (x >= mazeWidth - 2 && z == mazeDepth - 1);
+
+                bool isNorthBorder = (z == mazeDepth - 1) && !isExitZone;
+                bool isSouthBorder = (z == 0);
+                bool isEastBorder  = (x == mazeWidth - 1) && !(z == mazeDepth - 1);
+                bool isWestBorder  = (x == 0);
+
+                newCell.MarkBorderWalls(isNorthBorder, isSouthBorder, isEastBorder, isWestBorder);
+                mazeGrid[x, z] = newCell;
             }
         }
-        return bestIndex;
+
+        Stack<MazeCell> cellStack = new Stack<MazeCell>();
+        MazeCell currentCell = mazeGrid[0, 0];
+        currentCell.Visit();
+        cellStack.Push(currentCell);
+
+        while (cellStack.Count > 0)
+        {
+            currentCell = cellStack.Peek();
+            MazeCell nextCell = GetRandomUnvisitedNeighbor(currentCell);
+
+            if (nextCell != null)
+            {
+                RemoveWallBetween(currentCell, nextCell);
+                nextCell.Visit();
+                cellStack.Push(nextCell);
+            }
+            else
+            {
+                cellStack.Pop();
+            }
+        }
+
+        AddStrategicCyclesAndCentralHub();
+
+        mazeGrid[mazeWidth - 1, mazeDepth - 1].ClearNorthWall();
+        mazeGrid[mazeWidth - 1, mazeDepth - 1].ClearEastWall();
+        if (mazeWidth >= 2)
+        {
+            mazeGrid[mazeWidth - 2, mazeDepth - 1].ClearNorthWall();
+            mazeGrid[mazeWidth - 2, mazeDepth - 1].ClearEastWall();
+            mazeGrid[mazeWidth - 1, mazeDepth - 1].ClearWestWall();
+        }
+
+        // Guardamos la topología de conexiones abiertas en memoria para que el culling de GameObjects no afecte jamás a la IA
+        CacheNavigationConnectionsMask();
+
+        ComputeShortestEscapeRouteBFS();
+        VerifyMazeGraphAndCountCycles();
+
+        SpawnCentralSafeZoneAndWaypoints();
+        CreateExitBeaconAndBuilding();
+        CreateDebugPathLine();
+
+        if (playerTransform != null)
+        {
+            CharacterController cc = playerTransform.GetComponent<CharacterController>();
+            if (cc != null) cc.enabled = false;
+
+            playerTransform.position = new Vector3(0f, playerSpawnHeight, 0f);
+            playerTransform.rotation = Quaternion.identity;
+
+            if (cc != null) cc.enabled = true;
+        }
     }
 
-    // Obtiene una celda sobre el camino principal por delante del jugador (o en la mitad del mapa)
-    public Vector3 GetSpawnPointAheadOfPlayer(Vector3 playerWorldPos, int minCellsAhead, int maxCellsAhead)
+    private void CacheNavigationConnectionsMask()
     {
-        if (escapePathCells == null || escapePathCells.Count == 0)
+        for (int x = 0; x < mazeWidth; x++)
         {
-            return new Vector3((mazeWidth * 0.5f) * cellSize, 0f, (mazeDepth * 0.5f) * cellSize);
+            for (int z = 0; z < mazeDepth; z++)
+            {
+                MazeCell c = mazeGrid[x, z];
+                byte mask = 0;
+                if (z + 1 < mazeDepth && c.IsNorthOpen) mask |= 1;
+                if (z - 1 >= 0 && c.IsSouthOpen)        mask |= 2;
+                if (x + 1 < mazeWidth && c.IsEastOpen)  mask |= 4;
+                if (x - 1 >= 0 && c.IsWestOpen)         mask |= 8;
+                navConnectionsMask[x, z] = mask;
+            }
         }
-
-        int currentIndex = GetClosestEscapePathIndex(playerWorldPos);
-        int offset = Random.Range(minCellsAhead, maxCellsAhead + 1);
-        int targetIndex = Mathf.Clamp(currentIndex + offset, 0, escapePathCells.Count - 1);
-
-        // Evitamos spawnear justo encima del Street Light de la zona segura
-        Vector3 candidate = escapePathCells[targetIndex].transform.position;
-        if (IsPositionInSafeZone(candidate, 1.5f) && targetIndex + 2 < escapePathCells.Count)
-        {
-            candidate = escapePathCells[targetIndex + 2].transform.position;
-        }
-        return candidate;
     }
 
-    // Obtiene una celda sobre el camino principal a la espalda del jugador
-    public Vector3 GetSpawnPointBehindPlayer(Vector3 playerWorldPos, int minCellsBehind, int maxCellsBehind)
+    private void AddStrategicCyclesAndCentralHub()
     {
-        if (escapePathCells == null || escapePathCells.Count == 0)
+        int centerX = mazeWidth / 2;
+        int centerZ = mazeDepth / 2;
+        MazeCell centerCell = mazeGrid[centerX, centerZ];
+        SafeZoneCenter = centerCell.transform.position;
+        HasSafeZone = true;
+
+        for (int dx = -1; dx <= 1; dx++)
         {
-            return Vector3.zero;
+            for (int dz = -1; dz <= 1; dz++)
+            {
+                int x1 = centerX + dx;
+                int z1 = centerZ + dz;
+                if (x1 < 0 || x1 >= mazeWidth || z1 < 0 || z1 >= mazeDepth) continue;
+
+                if (x1 + 1 <= centerX + 1 && x1 + 1 < mazeWidth)
+                {
+                    RemoveWallBetween(mazeGrid[x1, z1], mazeGrid[x1 + 1, z1]);
+                }
+                if (z1 + 1 <= centerZ + 1 && z1 + 1 < mazeDepth)
+                {
+                    RemoveWallBetween(mazeGrid[x1, z1], mazeGrid[x1, z1 + 1]);
+                }
+            }
         }
 
-        int currentIndex = GetClosestEscapePathIndex(playerWorldPos);
-        int offset = Random.Range(minCellsBehind, maxCellsBehind + 1);
-        int targetIndex = Mathf.Clamp(currentIndex - offset, 0, escapePathCells.Count - 1);
-
-        // Si el jugador está muy cerca del inicio (0,0), buscamos una celda vecina detrás o a un costado a distancia segura
-        if (targetIndex == currentIndex)
+        List<MazeCell> deadEnds = new List<MazeCell>();
+        for (int x = 0; x < mazeWidth; x++)
         {
-            targetIndex = Mathf.Clamp(currentIndex + minCellsBehind, 0, escapePathCells.Count - 1);
+            for (int z = 0; z < mazeDepth; z++)
+            {
+                if ((x == 0 && z == 0) || (x == mazeWidth - 1 && z == mazeDepth - 1)) continue;
+                if (GetOpenPassageCount(mazeGrid[x, z]) == 1)
+                {
+                    deadEnds.Add(mazeGrid[x, z]);
+                }
+            }
         }
 
-        Vector3 candidate = escapePathCells[targetIndex].transform.position;
-        if (IsPositionInSafeZone(candidate, 1.5f) && targetIndex - 2 >= 0)
+        for (int i = 0; i < deadEnds.Count; i++)
         {
-            candidate = escapePathCells[targetIndex - 2].transform.position;
+            int swapIdx = Random.Range(i, deadEnds.Count);
+            MazeCell temp = deadEnds[i];
+            deadEnds[i] = deadEnds[swapIdx];
+            deadEnds[swapIdx] = temp;
         }
-        return candidate;
+
+        int deadEndsToOpen = Mathf.RoundToInt(deadEnds.Count * deadEndRemovalRatio);
+        for (int i = 0; i < deadEndsToOpen; i++)
+        {
+            MazeCell deadEnd = deadEnds[i];
+            if (GetOpenPassageCount(deadEnd) > 1) continue;
+
+            List<MazeCell> closedNeighbors = GetClosedAdjacentNeighbors(deadEnd);
+            if (closedNeighbors.Count > 0)
+            {
+                MazeCell chosenNeighbor = closedNeighbors[Random.Range(0, closedNeighbors.Count)];
+                RemoveWallBetween(deadEnd, chosenNeighbor);
+            }
+        }
+
+        int halfW = Mathf.Max(2, mazeWidth / 2);
+        int halfD = Mathf.Max(2, mazeDepth / 2);
+
+        for (int qx = 0; qx < 2; qx++)
+        {
+            for (int qz = 0; qz < 2; qz++)
+            {
+                int xStart = qx * halfW + 1;
+                int xEnd = Mathf.Min(mazeWidth - 2, (qx + 1) * halfW - 1);
+                int zStart = qz * halfD + 1;
+                int zEnd = Mathf.Min(mazeDepth - 2, (qz + 1) * halfD - 1);
+
+                List<MazeCell> quadrantCells = new List<MazeCell>();
+                for (int x = xStart; x <= xEnd; x++)
+                {
+                    for (int z = zStart; z <= zEnd; z++)
+                    {
+                        quadrantCells.Add(mazeGrid[x, z]);
+                    }
+                }
+
+                for (int i = 0; i < quadrantCells.Count; i++)
+                {
+                    int swapIdx = Random.Range(i, quadrantCells.Count);
+                    MazeCell tmp = quadrantCells[i];
+                    quadrantCells[i] = quadrantCells[swapIdx];
+                    quadrantCells[swapIdx] = tmp;
+                }
+
+                int cyclesAdded = 0;
+                foreach (MazeCell candidate in quadrantCells)
+                {
+                    if (cyclesAdded >= guaranteedCyclesPerQuadrant) break;
+
+                    List<MazeCell> closedNeighbors = GetClosedAdjacentNeighbors(candidate);
+                    if (closedNeighbors.Count > 0)
+                    {
+                        MazeCell neighbor = closedNeighbors[Random.Range(0, closedNeighbors.Count)];
+                        RemoveWallBetween(candidate, neighbor);
+                        cyclesAdded++;
+                    }
+                }
+            }
+        }
+    }
+
+    private void ComputeShortestEscapeRouteBFS()
+    {
+        escapePathCells.Clear();
+        escapePathPositions.Clear();
+
+        MazeCell startCell = mazeGrid[0, 0];
+        MazeCell midHubCell = mazeGrid[mazeWidth / 2, mazeDepth / 2];
+        MazeCell exitCell = mazeGrid[mazeWidth - 1, mazeDepth - 1];
+
+        List<MazeCell> firstHalf = FindShortestCellPathBFS(startCell, midHubCell);
+        List<MazeCell> secondHalf = FindShortestCellPathBFS(midHubCell, exitCell);
+
+        for (int i = 0; i < firstHalf.Count; i++)
+        {
+            escapePathCells.Add(firstHalf[i]);
+            escapePathPositions.Add(firstHalf[i].transform.position + new Vector3(0f, 0.2f, 0f));
+        }
+
+        for (int i = 1; i < secondHalf.Count; i++)
+        {
+            escapePathCells.Add(secondHalf[i]);
+            escapePathPositions.Add(secondHalf[i].transform.position + new Vector3(0f, 0.2f, 0f));
+        }
+
+        Vector3 exitPoint = exitCell.transform.position + new Vector3(0f, 0.2f, cellSize * 0.6f);
+        escapePathPositions.Add(exitPoint);
+    }
+
+    private List<MazeCell> FindShortestCellPathBFS(MazeCell fromCell, MazeCell toCell)
+    {
+        Queue<MazeCell> queue = new Queue<MazeCell>();
+        Dictionary<MazeCell, MazeCell> cameFrom = new Dictionary<MazeCell, MazeCell>();
+
+        queue.Enqueue(fromCell);
+        cameFrom[fromCell] = null;
+
+        while (queue.Count > 0)
+        {
+            MazeCell current = queue.Dequeue();
+            if (current == toCell) break;
+
+            foreach (MazeCell neighbor in GetAccessibleNeighbors(current))
+            {
+                if (!cameFrom.ContainsKey(neighbor))
+                {
+                    cameFrom[neighbor] = current;
+                    queue.Enqueue(neighbor);
+                }
+            }
+        }
+
+        List<MazeCell> path = new List<MazeCell>();
+        if (!cameFrom.ContainsKey(toCell))
+        {
+            path.Add(fromCell);
+            path.Add(toCell);
+            return path;
+        }
+
+        MazeCell curr = toCell;
+        while (curr != null)
+        {
+            path.Add(curr);
+            curr = cameFrom[curr];
+        }
+        path.Reverse();
+        return path;
+    }
+
+    private void VerifyMazeGraphAndCountCycles()
+    {
+        int totalVertices = mazeWidth * mazeDepth;
+        int totalOpenDirectedEdges = 0;
+        int deadEnds = 0;
+
+        for (int x = 0; x < mazeWidth; x++)
+        {
+            for (int z = 0; z < mazeDepth; z++)
+            {
+                int openCount = GetOpenPassageCount(mazeGrid[x, z]);
+                totalOpenDirectedEdges += openCount;
+                if (openCount == 1) deadEnds++;
+            }
+        }
+
+        int undirectedEdges = totalOpenDirectedEdges / 2;
+        TotalCyclesCount = Mathf.Max(0, undirectedEdges - totalVertices + 1);
+        RemainingDeadEndsCount = deadEnds;
+
+        Debug.Log($"[MazeGenerator] Laberinto {mazeWidth}x{mazeDepth} ({mazeWidth * cellSize}x{mazeDepth * cellSize}m) verificado: " +
+                  $"100% conexo | Ciclos activos: {TotalCyclesCount} | Callejones sin salida: {RemainingDeadEndsCount}");
+    }
+
+    private int GetOpenPassageCount(MazeCell cell)
+    {
+        int count = 0;
+        if (cell.GridZ + 1 < mazeDepth && cell.IsNorthOpen) count++;
+        if (cell.GridZ - 1 >= 0 && cell.IsSouthOpen) count++;
+        if (cell.GridX + 1 < mazeWidth && cell.IsEastOpen) count++;
+        if (cell.GridX - 1 >= 0 && cell.IsWestOpen) count++;
+        return count;
+    }
+
+    private List<MazeCell> GetClosedAdjacentNeighbors(MazeCell cell)
+    {
+        List<MazeCell> closed = new List<MazeCell>(4);
+        int x = cell.GridX;
+        int z = cell.GridZ;
+
+        if (z + 1 < mazeDepth && !cell.IsNorthOpen) closed.Add(mazeGrid[x, z + 1]);
+        if (z - 1 >= 0 && !cell.IsSouthOpen) closed.Add(mazeGrid[x, z - 1]);
+        if (x + 1 < mazeWidth && !cell.IsEastOpen) closed.Add(mazeGrid[x + 1, z]);
+        if (x - 1 >= 0 && !cell.IsWestOpen) closed.Add(mazeGrid[x - 1, z]);
+
+        return closed;
+    }
+
+    public bool HasCorridorLineOfSight(Vector3 fromWorldPos, Vector3 toWorldPos)
+    {
+        if (mazeGrid == null) return false;
+
+        Vector3 diff = toWorldPos - fromWorldPos;
+        diff.y = 0f;
+        float dist = diff.magnitude;
+        if (dist < 0.2f) return true;
+
+        int steps = Mathf.CeilToInt(dist / (cellSize * 0.2f));
+        int prevX = Mathf.Clamp(Mathf.RoundToInt(fromWorldPos.x / cellSize), 0, mazeWidth - 1);
+        int prevZ = Mathf.Clamp(Mathf.RoundToInt(fromWorldPos.z / cellSize), 0, mazeDepth - 1);
+
+        for (int i = 1; i <= steps; i++)
+        {
+            float t = (float)i / steps;
+            Vector3 samplePos = Vector3.Lerp(fromWorldPos, toWorldPos, t);
+            int curX = Mathf.Clamp(Mathf.RoundToInt(samplePos.x / cellSize), 0, mazeWidth - 1);
+            int curZ = Mathf.Clamp(Mathf.RoundToInt(samplePos.z / cellSize), 0, mazeDepth - 1);
+
+            if (curX != prevX || curZ != prevZ)
+            {
+                if (Mathf.Abs(curX - prevX) + Mathf.Abs(curZ - prevZ) == 1)
+                {
+                    if (!AreAdjacentCoordsConnected(prevX, prevZ, curX, curZ))
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    bool pathA = AreAdjacentCoordsConnected(prevX, prevZ, curX, prevZ) && AreAdjacentCoordsConnected(curX, prevZ, curX, curZ);
+                    bool pathB = AreAdjacentCoordsConnected(prevX, prevZ, prevX, curZ) && AreAdjacentCoordsConnected(prevX, curZ, curX, curZ);
+                    if (!pathA || !pathB)
+                    {
+                        return false;
+                    }
+                }
+
+                prevX = curX;
+                prevZ = curZ;
+            }
+        }
+
+        return true;
+    }
+
+    private bool AreAdjacentCoordsConnected(int x1, int z1, int x2, int z2)
+    {
+        if (navConnectionsMask == null) return false;
+        byte mask = navConnectionsMask[x1, z1];
+        if (x2 == x1 + 1 && z2 == z1) return (mask & 4) != 0;
+        if (x2 == x1 - 1 && z2 == z1) return (mask & 8) != 0;
+        if (z2 == z1 + 1 && x2 == x1) return (mask & 1) != 0;
+        if (z2 == z1 - 1 && x2 == x1) return (mask & 2) != 0;
+        return false;
+    }
+
+    public List<Vector3> GetConnectedCorridorPositions(Vector3 worldPos, bool excludeSafeZone = true)
+    {
+        List<Vector3> results = new List<Vector3>();
+        if (mazeGrid == null) return results;
+
+        int cx = Mathf.Clamp(Mathf.RoundToInt(worldPos.x / cellSize), 0, mazeWidth - 1);
+        int cz = Mathf.Clamp(Mathf.RoundToInt(worldPos.z / cellSize), 0, mazeDepth - 1);
+        MazeCell cell = mazeGrid[cx, cz];
+
+        foreach (MazeCell neighbor in GetAccessibleNeighbors(cell))
+        {
+            Vector3 pos = new Vector3(neighbor.GridX * cellSize, 0f, neighbor.GridZ * cellSize);
+            if (excludeSafeZone && IsPositionInSafeZone3D(pos, 0.8f))
+            {
+                continue;
+            }
+            results.Add(pos);
+        }
+        return results;
+    }
+
+    public Vector3 GetRandomPatrolPointInSector(int sectorIndex, Vector3 avoidPos, float minAvoidDist)
+    {
+        int halfW = mazeWidth / 2;
+        int halfD = mazeDepth / 2;
+
+        int xMin = (sectorIndex % 2 == 0) ? 0 : halfW;
+        int xMax = (sectorIndex % 2 == 0) ? halfW - 1 : mazeWidth - 1;
+        int zMin = (sectorIndex < 2) ? 0 : halfD;
+        int zMax = (sectorIndex < 2) ? halfD - 1 : mazeDepth - 1;
+
+        for (int attempt = 0; attempt < 40; attempt++)
+        {
+            int rx = Random.Range(xMin, xMax + 1);
+            int rz = Random.Range(zMin, zMax + 1);
+            Vector3 pos = new Vector3(rx * cellSize, 0f, rz * cellSize);
+
+            if (IsPositionInSafeZone3D(pos, 1.5f)) continue;
+            if (Vector3.Distance(pos, avoidPos) < minAvoidDist) continue;
+
+            return pos;
+        }
+
+        int fallbackX = Random.Range(2, mazeWidth - 2);
+        int fallbackZ = Random.Range(2, mazeDepth - 2);
+        return new Vector3(fallbackX * cellSize, 0f, fallbackZ * cellSize);
+    }
+
+    public Vector3 GetNextPathStep(Vector3 fromWorldPos, Vector3 targetWorldPos, bool avoidSafeZone = false)
+    {
+        if (mazeGrid == null) return targetWorldPos;
+
+        int startX = Mathf.Clamp(Mathf.RoundToInt(fromWorldPos.x / cellSize), 0, mazeWidth - 1);
+        int startZ = Mathf.Clamp(Mathf.RoundToInt(fromWorldPos.z / cellSize), 0, mazeDepth - 1);
+
+        int targetX = Mathf.Clamp(Mathf.RoundToInt(targetWorldPos.x / cellSize), 0, mazeWidth - 1);
+        int targetZ = Mathf.Clamp(Mathf.RoundToInt(targetWorldPos.z / cellSize), 0, mazeDepth - 1);
+
+        if (startX == targetX && startZ == targetZ)
+        {
+            return targetWorldPos;
+        }
+
+        MazeCell startCell = mazeGrid[startX, startZ];
+        MazeCell targetCell = mazeGrid[targetX, targetZ];
+
+        Queue<MazeCell> queue = new Queue<MazeCell>();
+        Dictionary<MazeCell, MazeCell> cameFrom = new Dictionary<MazeCell, MazeCell>();
+
+        queue.Enqueue(startCell);
+        cameFrom[startCell] = null;
+
+        while (queue.Count > 0)
+        {
+            MazeCell current = queue.Dequeue();
+            if (current == targetCell) break;
+
+            foreach (MazeCell neighbor in GetAccessibleNeighbors(current))
+            {
+                Vector3 neighborWorldPos = new Vector3(neighbor.GridX * cellSize, 0f, neighbor.GridZ * cellSize);
+                if (avoidSafeZone && neighbor != targetCell && IsPositionInSafeZone3D(neighborWorldPos, 0.5f))
+                {
+                    continue;
+                }
+
+                if (!cameFrom.ContainsKey(neighbor))
+                {
+                    cameFrom[neighbor] = current;
+                    queue.Enqueue(neighbor);
+                }
+            }
+        }
+
+        if (!cameFrom.ContainsKey(targetCell))
+        {
+            return new Vector3(startX * cellSize, 0f, startZ * cellSize);
+        }
+
+        MazeCell step = targetCell;
+        while (cameFrom[step] != null && cameFrom[step] != startCell)
+        {
+            step = cameFrom[step];
+        }
+
+        return new Vector3(step.GridX * cellSize, 0f, step.GridZ * cellSize);
+    }
+
+    private List<MazeCell> GetAccessibleNeighbors(MazeCell cell)
+    {
+        List<MazeCell> neighbors = new List<MazeCell>(4);
+        int x = cell.GridX;
+        int z = cell.GridZ;
+
+        if (navConnectionsMask != null)
+        {
+            byte mask = navConnectionsMask[x, z];
+            if ((mask & 1) != 0 && z + 1 < mazeDepth) neighbors.Add(mazeGrid[x, z + 1]);
+            if ((mask & 2) != 0 && z - 1 >= 0)        neighbors.Add(mazeGrid[x, z - 1]);
+            if ((mask & 4) != 0 && x + 1 < mazeWidth) neighbors.Add(mazeGrid[x + 1, z]);
+            if ((mask & 8) != 0 && x - 1 >= 0)        neighbors.Add(mazeGrid[x - 1, z]);
+            return neighbors;
+        }
+
+        if (z + 1 < mazeDepth && cell.IsNorthOpen)
+            neighbors.Add(mazeGrid[x, z + 1]);
+        if (z - 1 >= 0 && cell.IsSouthOpen)
+            neighbors.Add(mazeGrid[x, z - 1]);
+        if (x + 1 < mazeWidth && cell.IsEastOpen)
+            neighbors.Add(mazeGrid[x + 1, z]);
+        if (x - 1 >= 0 && cell.IsWestOpen)
+            neighbors.Add(mazeGrid[x - 1, z]);
+
+        return neighbors;
+    }
+
+    private void SpawnCentralSafeZoneAndWaypoints()
+    {
+        GameObject waypointsParent = new GameObject("StrategicWaypointsAndSafeZone");
+        waypointsParent.transform.SetParent(transform);
+
+        if (streetLightPrefab != null)
+        {
+            Vector3 lampOffset = new Vector3(cellSize * 0.18f, 0f, cellSize * 0.18f);
+            GameObject streetLightObj = Instantiate(
+                streetLightPrefab,
+                SafeZoneCenter + lampOffset,
+                Quaternion.identity,
+                waypointsParent.transform
+            );
+            streetLightObj.name = "MidMaze_StreetLight_SafeZone";
+
+            GameObject safeLightObj = new GameObject("SafeZoneWarmLight");
+            safeLightObj.transform.SetParent(streetLightObj.transform);
+            safeLightObj.transform.localPosition = new Vector3(0f, 3.2f, 0f);
+
+            Light safeLight = safeLightObj.AddComponent<Light>();
+            safeLight.type = LightType.Point;
+            safeLight.color = streetLightColor;
+            safeLight.range = safeZoneRadius * 2.4f;
+            safeLight.intensity = streetLightIntensity;
+            safeLight.shadows = LightShadows.None; // Sin sombras pesadas para optimizar en baja gama
+        }
+
+        if (escapePathCells.Count < 4) return;
+        int pathCount = escapePathCells.Count;
+
+        if (signPostPrefab != null && totalSignPosts > 0)
+        {
+            int signsToSpawn = Mathf.Min(totalSignPosts, pathCount - 1);
+            for (int q = 0; q < signsToSpawn; q++)
+            {
+                float normalizedPos = (q + 0.5f) / signsToSpawn;
+                int targetIdx = Mathf.Clamp(Mathf.RoundToInt(normalizedPos * (pathCount - 2)), 0, pathCount - 2);
+
+                int chosenIdx = FindNearestCornerIndex(targetIdx, 2);
+                MazeCell current = escapePathCells[chosenIdx];
+                MazeCell next = escapePathCells[chosenIdx + 1];
+
+                if (IsPositionInSafeZone3D(current.transform.position, 1f) && chosenIdx + 1 < pathCount - 1)
+                {
+                    chosenIdx++;
+                    current = escapePathCells[chosenIdx];
+                    next = escapePathCells[chosenIdx + 1];
+                }
+
+                Vector3 dirToNext = (next.transform.position - current.transform.position).normalized;
+                Vector3 sideOffset = Vector3.Cross(Vector3.up, dirToNext) * (cellSize * 0.24f);
+                Vector3 signPos = current.transform.position + sideOffset;
+
+                Quaternion signRot = Quaternion.LookRotation(dirToNext) * Quaternion.Euler(0f, signPostRotationOffset, 0f);
+                GameObject signObj = Instantiate(signPostPrefab, signPos, signRot, waypointsParent.transform);
+                signObj.name = $"SignPost_Quarter_{q + 1}";
+
+                GameObject signLightObj = new GameObject("SignWarmGlow");
+                signLightObj.transform.SetParent(signObj.transform);
+                signLightObj.transform.localPosition = new Vector3(0f, 1.1f, 0f);
+                Light warmLight = signLightObj.AddComponent<Light>();
+                warmLight.type = LightType.Point;
+                warmLight.color = new Color(1f, 0.65f, 0.25f, 1f);
+                warmLight.range = 3.2f;
+                warmLight.intensity = 1.1f;
+                warmLight.shadows = LightShadows.None;
+            }
+        }
+
+        if (fencePostPrefab != null && fencePostInterval > 0)
+        {
+            for (int i = fencePostInterval; i < pathCount - 1; i += fencePostInterval)
+            {
+                MazeCell current = escapePathCells[i];
+                if (IsPositionInSafeZone3D(current.transform.position, 1.5f)) continue;
+
+                MazeCell next = escapePathCells[i + 1];
+                Vector3 dirToNext = (next.transform.position - current.transform.position).normalized;
+
+                Vector3 sideOffset = -Vector3.Cross(Vector3.up, dirToNext) * (cellSize * 0.26f);
+                Vector3 fencePos = current.transform.position + sideOffset;
+                Quaternion fenceRot = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
+
+                GameObject fenceObj = Instantiate(fencePostPrefab, fencePos, fenceRot, waypointsParent.transform);
+                fenceObj.name = $"FencePost_Step_{i}";
+            }
+        }
+    }
+
+    private int FindNearestCornerIndex(int centerIdx, int searchRadius)
+    {
+        int pathCount = escapePathCells.Count;
+        for (int offset = 0; offset <= searchRadius; offset++)
+        {
+            int idxPlus = centerIdx + offset;
+            if (idxPlus > 0 && idxPlus < pathCount - 1 && IsCornerCell(idxPlus))
+                return idxPlus;
+
+            int idxMinus = centerIdx - offset;
+            if (idxMinus > 0 && idxMinus < pathCount - 1 && IsCornerCell(idxMinus))
+                return idxMinus;
+        }
+        return centerIdx;
+    }
+
+    private bool IsCornerCell(int idx)
+    {
+        Vector3 dirIn = (escapePathCells[idx].transform.position - escapePathCells[idx - 1].transform.position).normalized;
+        Vector3 dirOut = (escapePathCells[idx + 1].transform.position - escapePathCells[idx].transform.position).normalized;
+        return Vector3.Dot(dirIn, dirOut) < 0.5f;
     }
 
     private void UpdateExitBrightnessAndVictory()
@@ -315,6 +943,7 @@ public class MazeGenerator : MonoBehaviour
             {
                 sceneLight.intensity = 0.01f;
                 sceneLight.color = new Color(0.05f, 0.08f, 0.15f, 1f);
+                sceneLight.shadows = LightShadows.None;
             }
         }
 
@@ -325,300 +954,9 @@ public class MazeGenerator : MonoBehaviour
         }
     }
 
-    public void GenerateMaze()
-    {
-        mazeGrid = new MazeCell[mazeWidth, mazeDepth];
-        escapePathCells.Clear();
-        escapePathPositions.Clear();
-
-        for (int x = 0; x < mazeWidth; x++)
-        {
-            for (int z = 0; z < mazeDepth; z++)
-            {
-                Vector3 position = new Vector3(x * cellSize, 0f, z * cellSize);
-                MazeCell newCell = Instantiate(mazeCellPrefab, position, Quaternion.identity, transform);
-                newCell.name = $"MazeCell_{x}_{z}";
-                newCell.Initialize(x, z);
-
-                bool isExitZone = (x >= mazeWidth - 2 && z == mazeDepth - 1);
-
-                bool isNorthBorder = (z == mazeDepth - 1) && !isExitZone;
-                bool isSouthBorder = (z == 0);
-                bool isEastBorder  = (x == mazeWidth - 1) && !(z == mazeDepth - 1);
-                bool isWestBorder  = (x == 0);
-
-                newCell.MarkBorderWalls(isNorthBorder, isSouthBorder, isEastBorder, isWestBorder);
-                mazeGrid[x, z] = newCell;
-            }
-        }
-
-        Stack<MazeCell> cellStack = new Stack<MazeCell>();
-        MazeCell currentCell = mazeGrid[0, 0];
-        currentCell.Visit();
-        cellStack.Push(currentCell);
-
-        while (cellStack.Count > 0)
-        {
-            currentCell = cellStack.Peek();
-
-            if (currentCell.GridX == mazeWidth - 1 && currentCell.GridZ == mazeDepth - 1 && escapePathCells.Count == 0)
-            {
-                RecordEscapePath(cellStack);
-            }
-
-            MazeCell nextCell = GetRandomUnvisitedNeighbor(currentCell);
-
-            if (nextCell != null)
-            {
-                RemoveWallBetween(currentCell, nextCell);
-                nextCell.Visit();
-                cellStack.Push(nextCell);
-            }
-            else
-            {
-                cellStack.Pop();
-            }
-        }
-
-        mazeGrid[mazeWidth - 1, mazeDepth - 1].ClearNorthWall();
-        mazeGrid[mazeWidth - 1, mazeDepth - 1].ClearEastWall();
-        if (mazeWidth >= 2)
-        {
-            mazeGrid[mazeWidth - 2, mazeDepth - 1].ClearNorthWall();
-            mazeGrid[mazeWidth - 2, mazeDepth - 1].ClearEastWall();
-            mazeGrid[mazeWidth - 1, mazeDepth - 1].ClearWestWall();
-        }
-
-        SpawnQuarterSignPostsAndMidSafeZone();
-        CreateExitBeaconAndBuilding();
-        CreateDebugPathLine();
-
-        if (playerTransform != null)
-        {
-            CharacterController cc = playerTransform.GetComponent<CharacterController>();
-            if (cc != null) cc.enabled = false;
-
-            playerTransform.position = new Vector3(0f, playerSpawnHeight, 0f);
-            playerTransform.rotation = Quaternion.identity;
-
-            if (cc != null) cc.enabled = true;
-        }
-    }
-
-    private void RecordEscapePath(Stack<MazeCell> currentStack)
-    {
-        MazeCell[] pathArray = currentStack.ToArray();
-        for (int i = pathArray.Length - 1; i >= 0; i--)
-        {
-            escapePathCells.Add(pathArray[i]);
-            Vector3 cellCenter = pathArray[i].transform.position + new Vector3(0f, 0.2f, 0f);
-            escapePathPositions.Add(cellCenter);
-        }
-
-        Vector3 exitPoint = mazeGrid[mazeWidth - 1, mazeDepth - 1].transform.position
-                            + new Vector3(0f, 0.2f, cellSize * 0.6f);
-        escapePathPositions.Add(exitPoint);
-    }
-
-    private void SpawnQuarterSignPostsAndMidSafeZone()
-    {
-        if (escapePathCells.Count < 4) return;
-
-        GameObject waypointsParent = new GameObject("StrategicWaypointsAndSafeZone");
-        waypointsParent.transform.SetParent(transform);
-
-        int pathCount = escapePathCells.Count;
-
-        // 1. Crear el único Street Light (Zona Segura) exactamente en la mitad del camino del laberinto
-        int midIndex = pathCount / 2;
-        MazeCell midCell = escapePathCells[midIndex];
-        SafeZoneCenter = midCell.transform.position;
-        HasSafeZone = true;
-
-        if (streetLightPrefab != null)
-        {
-            Vector3 nextDir = (midIndex + 1 < pathCount)
-                ? (escapePathCells[midIndex + 1].transform.position - midCell.transform.position).normalized
-                : Vector3.forward;
-            Vector3 sideOffset = Vector3.Cross(Vector3.up, nextDir) * (cellSize * 0.22f);
-
-            GameObject streetLightObj = Instantiate(
-                streetLightPrefab,
-                SafeZoneCenter + sideOffset,
-                Quaternion.identity,
-                waypointsParent.transform
-            );
-            streetLightObj.name = "MidMaze_StreetLight_SafeZone";
-
-            // Luz cálida protectora sobre la Zona Segura (cubre el radio de ~3.5m)
-            GameObject safeLightObj = new GameObject("SafeZoneWarmLight");
-            safeLightObj.transform.SetParent(streetLightObj.transform);
-            safeLightObj.transform.localPosition = new Vector3(0f, 3.2f, 0f);
-
-            Light safeLight = safeLightObj.AddComponent<Light>();
-            safeLight.type = LightType.Point;
-            safeLight.color = streetLightColor;
-            safeLight.range = safeZoneRadius * 2.2f;
-            safeLight.intensity = streetLightIntensity;
-            safeLight.shadows = LightShadows.Soft;
-        }
-
-        // 2. Colocar únicamente 4 SignPosts (1 en cada cuarto del camino de escape)
-        if (signPostPrefab != null && totalSignPosts > 0)
-        {
-            int signsToSpawn = Mathf.Min(totalSignPosts, pathCount - 1);
-            for (int q = 0; q < signsToSpawn; q++)
-            {
-                // Ubicamos cada SignPost al ~15%, ~38%, ~62% y ~85% del camino (uno por cada cuarto)
-                float normalizedPos = (q + 0.5f) / signsToSpawn;
-                int targetIdx = Mathf.Clamp(Mathf.RoundToInt(normalizedPos * (pathCount - 2)), 0, pathCount - 2);
-
-                // Si a 1 o 2 celdas hay un giro de esquina, preferimos poner el cartel justo en esa esquina
-                int chosenIdx = FindNearestCornerIndex(targetIdx, 2);
-                if (chosenIdx == midIndex && chosenIdx + 1 < pathCount - 1)
-                {
-                    chosenIdx++;
-                }
-
-                MazeCell current = escapePathCells[chosenIdx];
-                MazeCell next = escapePathCells[chosenIdx + 1];
-                Vector3 dirToNext = (next.transform.position - current.transform.position).normalized;
-
-                Vector3 sideOffset = Vector3.Cross(Vector3.up, dirToNext) * (cellSize * 0.24f);
-                Vector3 signPos = current.transform.position + sideOffset;
-
-                Quaternion signRot = Quaternion.LookRotation(dirToNext) * Quaternion.Euler(0f, signPostRotationOffset, 0f);
-                GameObject signObj = Instantiate(signPostPrefab, signPos, signRot, waypointsParent.transform);
-                signObj.name = $"SignPost_Quarter_{q + 1}";
-
-                GameObject signLightObj = new GameObject("SignWarmGlow");
-                signLightObj.transform.SetParent(signObj.transform);
-                signLightObj.transform.localPosition = new Vector3(0f, 1.1f, 0f);
-                Light warmLight = signLightObj.AddComponent<Light>();
-                warmLight.type = LightType.Point;
-                warmLight.color = new Color(1f, 0.65f, 0.25f, 1f);
-                warmLight.range = 3.2f;
-                warmLight.intensity = 1.1f;
-            }
-        }
-
-        // 3. Fence Posts opcionales espaciados
-        if (fencePostPrefab != null && fencePostInterval > 0)
-        {
-            for (int i = fencePostInterval; i < pathCount - 1; i += fencePostInterval)
-            {
-                if (i == midIndex) continue;
-                MazeCell current = escapePathCells[i];
-                MazeCell next = escapePathCells[i + 1];
-                Vector3 dirToNext = (next.transform.position - current.transform.position).normalized;
-
-                Vector3 sideOffset = -Vector3.Cross(Vector3.up, dirToNext) * (cellSize * 0.26f);
-                Vector3 fencePos = current.transform.position + sideOffset;
-                Quaternion fenceRot = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
-
-                GameObject fenceObj = Instantiate(fencePostPrefab, fencePos, fenceRot, waypointsParent.transform);
-                fenceObj.name = $"FencePost_Step_{i}";
-            }
-        }
-    }
-
-    private int FindNearestCornerIndex(int centerIdx, int searchRadius)
-    {
-        int pathCount = escapePathCells.Count;
-        for (int offset = 0; offset <= searchRadius; offset++)
-        {
-            int idxPlus = centerIdx + offset;
-            if (idxPlus > 0 && idxPlus < pathCount - 1 && IsCornerCell(idxPlus))
-                return idxPlus;
-
-            int idxMinus = centerIdx - offset;
-            if (idxMinus > 0 && idxMinus < pathCount - 1 && IsCornerCell(idxMinus))
-                return idxMinus;
-        }
-        return centerIdx;
-    }
-
-    private bool IsCornerCell(int idx)
-    {
-        Vector3 dirIn = (escapePathCells[idx].transform.position - escapePathCells[idx - 1].transform.position).normalized;
-        Vector3 dirOut = (escapePathCells[idx + 1].transform.position - escapePathCells[idx].transform.position).normalized;
-        return Vector3.Dot(dirIn, dirOut) < 0.5f;
-    }
-
-    public Vector3 GetNextPathStep(Vector3 fromWorldPos, Vector3 targetWorldPos)
-    {
-        if (mazeGrid == null) return targetWorldPos;
-
-        int startX = Mathf.Clamp(Mathf.RoundToInt(fromWorldPos.x / cellSize), 0, mazeWidth - 1);
-        int startZ = Mathf.Clamp(Mathf.RoundToInt(fromWorldPos.z / cellSize), 0, mazeDepth - 1);
-
-        int targetX = Mathf.Clamp(Mathf.RoundToInt(targetWorldPos.x / cellSize), 0, mazeWidth - 1);
-        int targetZ = Mathf.Clamp(Mathf.RoundToInt(targetWorldPos.z / cellSize), 0, mazeDepth - 1);
-
-        if (startX == targetX && startZ == targetZ)
-        {
-            return targetWorldPos;
-        }
-
-        MazeCell startCell = mazeGrid[startX, startZ];
-        MazeCell targetCell = mazeGrid[targetX, targetZ];
-
-        Queue<MazeCell> queue = new Queue<MazeCell>();
-        Dictionary<MazeCell, MazeCell> cameFrom = new Dictionary<MazeCell, MazeCell>();
-
-        queue.Enqueue(startCell);
-        cameFrom[startCell] = null;
-
-        while (queue.Count > 0)
-        {
-            MazeCell current = queue.Dequeue();
-            if (current == targetCell) break;
-
-            foreach (MazeCell neighbor in GetAccessibleNeighbors(current))
-            {
-                if (!cameFrom.ContainsKey(neighbor))
-                {
-                    cameFrom[neighbor] = current;
-                    queue.Enqueue(neighbor);
-                }
-            }
-        }
-
-        if (!cameFrom.ContainsKey(targetCell))
-        {
-            return targetWorldPos;
-        }
-
-        MazeCell step = targetCell;
-        while (cameFrom[step] != null && cameFrom[step] != startCell)
-        {
-            step = cameFrom[step];
-        }
-
-        return step.transform.position;
-    }
-
-    private List<MazeCell> GetAccessibleNeighbors(MazeCell cell)
-    {
-        List<MazeCell> neighbors = new List<MazeCell>(4);
-        int x = cell.GridX;
-        int z = cell.GridZ;
-
-        if (z + 1 < mazeDepth && cell.IsNorthOpen)
-            neighbors.Add(mazeGrid[x, z + 1]);
-        if (z - 1 >= 0 && cell.IsSouthOpen)
-            neighbors.Add(mazeGrid[x, z - 1]);
-        if (x + 1 < mazeWidth && cell.IsEastOpen)
-            neighbors.Add(mazeGrid[x + 1, z]);
-        if (x - 1 >= 0 && cell.IsWestOpen)
-            neighbors.Add(mazeGrid[x - 1, z]);
-
-        return neighbors;
-    }
-
     private void CreateExitBeaconAndBuilding()
     {
-        Vector3 exitCellCenter = mazeGrid[mazeWidth - 1, mazeDepth - 1].transform.position;
+        Vector3 exitCellCenter = new Vector3((mazeWidth - 1) * cellSize, 0f, (mazeDepth - 1) * cellSize);
         exitPortalPosition = exitCellCenter + new Vector3(0f, 0f, cellSize * 0.5f);
 
         if (exitBuildingPrefab != null)
@@ -641,7 +979,7 @@ public class MazeGenerator : MonoBehaviour
         exitMainLight.color = exitLightColor;
         exitMainLight.intensity = exitLightIntensity;
         exitMainLight.range = exitLightRange;
-        exitMainLight.shadows = LightShadows.Soft;
+        exitMainLight.shadows = LightShadows.None;
 
         GameObject spotLightObj = new GameObject("ExitSpotLight");
         spotLightObj.transform.SetParent(beaconObj.transform);
@@ -653,6 +991,7 @@ public class MazeGenerator : MonoBehaviour
         spotLight.intensity = exitLightIntensity * 1.5f;
         spotLight.range = 25f;
         spotLight.spotAngle = 65f;
+        spotLight.shadows = LightShadows.None;
 
         LineRenderer beam = beaconObj.AddComponent<LineRenderer>();
         beam.positionCount = 2;
@@ -747,18 +1086,19 @@ public class MazeGenerator : MonoBehaviour
 
     private void OnDrawGizmos()
     {
-        if (escapePathPositions == null || escapePathPositions.Count < 2) return;
-
-        Gizmos.color = debugPathColor;
-        for (int i = 0; i < escapePathPositions.Count - 1; i++)
+        if (escapePathPositions != null && escapePathPositions.Count >= 2)
         {
-            Gizmos.DrawLine(escapePathPositions[i], escapePathPositions[i + 1]);
-            Gizmos.DrawSphere(escapePathPositions[i], 0.2f);
+            Gizmos.color = debugPathColor;
+            for (int i = 0; i < escapePathPositions.Count - 1; i++)
+            {
+                Gizmos.DrawLine(escapePathPositions[i], escapePathPositions[i + 1]);
+                Gizmos.DrawSphere(escapePathPositions[i], 0.2f);
+            }
         }
 
         if (HasSafeZone)
         {
-            Gizmos.color = new Color(1f, 0.85f, 0.3f, 0.4f);
+            Gizmos.color = new Color(1f, 0.85f, 0.3f, 0.5f);
             Gizmos.DrawWireSphere(SafeZoneCenter, safeZoneRadius);
         }
     }

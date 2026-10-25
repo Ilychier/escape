@@ -5,24 +5,46 @@ using UnityEngine.SceneManagement;
 
 public class GoblinEnemy : MonoBehaviour
 {
-    public enum StalkDirectionRole
+    // Lista estática rápida para que el indicador de arco en pantalla no tenga que llamar a FindObjectsOfType en cada fotograma
+    public static readonly List<GoblinEnemy> AllActiveEnemies = new List<GoblinEnemy>();
+
+    public enum AIState
     {
-        FrontApproacher, // Spawnea adelante en la ruta y viene hacia el jugador para acecharlo de frente
-        RearStalker      // Spawnea detrás del jugador unos segundos después y lo acecha por la espalda
+        Patrol,               // Patrulla por intersecciones sin conocer la posición del jugador
+        Chase,                // Persecución activa mientras tiene línea de visión o escucha cercana
+        InvestigateLastKnown, // Va hasta la última posición donde vio o escuchó al jugador
+        SearchNearbyRoutes,   // Explora los pasillos y bifurcaciones adyacentes antes de rendirse
+        Stunned               // Aturdido temporalmente por el impacto de una roca
     }
 
-    [Header("Persecución y Ataque")]
-    [SerializeField] private float moveSpeed = 2.3f;
-    [SerializeField] private float killDistance = 1.2f;
-    [SerializeField] private float stunDuration = 4.5f;
+    [Header("Velocidades por Estado")]
+    [SerializeField] private float patrolSpeed = 1.95f;
+    [SerializeField] private float investigateSpeed = 2.4f;
+    [SerializeField] private float searchSpeed = 2.15f;
+    [SerializeField] private float chaseSpeed = 2.85f;
 
-    [Header("IA de Acecho (Stalking antes de Cazar)")]
-    [Tooltip("Segundos que el enemigo te acecha antes de lanzarse a cazarte")]
-    [SerializeField] private float stalkDuration = 8f;
-    [Tooltip("Distancia a la que se mantiene acechándote antes de pasar a modo caza")]
-    [SerializeField] private float stalkKeepDistance = 7.5f;
-    [Tooltip("Multiplicador de velocidad cuando pasa a cazarte definitivamente")]
-    [SerializeField] private float huntSpeedMultiplier = 1.3f;
+    [Header("Percepción (Línea de Visión y Oído)")]
+    [Tooltip("Distancia máxima a la que puede verte en un pasillo despejado")]
+    [SerializeField] private float visionRange = 16.0f;
+    [Tooltip("Ángulo del cono de visión frontal en grados")]
+    [Range(60f, 170f)]
+    [SerializeField] private float visionAngle = 115f;
+    [Tooltip("Distancia a la que detecta pasos si el jugador va corriendo con Shift")]
+    [SerializeField] private float hearingRangeRunning = 8.5f;
+    [Tooltip("Distancia corta a la que percibe al jugador aunque vaya caminando")]
+    [SerializeField] private float closeProximitySenseRange = 2.6f;
+    [Tooltip("Tiempo de retención visual tras doblar una esquina antes de perder el rastro directo")]
+    [SerializeField] private float loseSightGraceTime = 0.55f;
+
+    [Header("Búsqueda e Investigación")]
+    [Tooltip("Segundos que explora las rutas cercanas a la última posición conocida antes de volver a patrullar")]
+    [SerializeField] private float searchDuration = 7.5f;
+    [Tooltip("Frecuencia en segundos con la que recalcula el siguiente paso del camino")]
+    [SerializeField] private float pathUpdateInterval = 0.2f;
+
+    [Header("Captura y Aturdimiento")]
+    [SerializeField] private float killDistance = 1.15f;
+    [SerializeField] private float stunDuration = 4.5f;
 
     [Header("Apariencia Oscura del Enemigo")]
     [Range(0.05f, 1f)]
@@ -42,56 +64,83 @@ public class GoblinEnemy : MonoBehaviour
     private AudioClip catchClip;
     private float catchVolume = 1f;
 
-    private bool isStunned = false;
+    private AIState currentState = AIState.Patrol;
+    private int homeSectorIndex = 0;
+
+    private Vector3 lastKnownPlayerPosition;
+    private Vector3 lastSeenPlayerMoveDir;
+    private Vector3 previousPlayerPos;
+    private float timeSinceLastSawPlayer = 999f;
+
+    private Vector3 currentTargetPosition;
+    private Vector3 currentStepWaypoint;
+    private float pathUpdateTimer = 0f;
+    private float stateTimer = 0f;
+    private Queue<Vector3> searchBranchQueue = new Queue<Vector3>();
+
     private float stunTimer = 0f;
-    private bool isHunting = false;
-    private float stalkTimer = 0f;
     private float walkAnimPhase = 0f;
     private static bool isPlayerDying = false;
 
-    public int AssignedQuarter { get; private set; }
-    public StalkDirectionRole Role { get; private set; }
-    public bool IsOutOfSegment { get; private set; }
-    public bool IsStunned => isStunned;
+    public AIState CurrentState => currentState;
+    public bool IsStunned => currentState == AIState.Stunned;
 
     private void Awake()
     {
         isPlayerDying = false;
     }
 
+    private void OnEnable()
+    {
+        if (!AllActiveEnemies.Contains(this))
+        {
+            AllActiveEnemies.Add(this);
+        }
+    }
+
+    private void OnDisable()
+    {
+        AllActiveEnemies.Remove(this);
+    }
+
     public void Initialize(
         Transform playerTarget,
-        float speed,
+        float baseChaseSpeed,
         float stunTime,
         AudioClip ambientMp3,
         float hearingRadius,
         float ambientVol,
         AudioClip onCatchMp3,
         float onCatchVol,
-        int quarterIndex = 0,
-        StalkDirectionRole role = StalkDirectionRole.FrontApproacher,
+        int assignedSector = 0,
         float customJumpscareHeight = 1.45f,
         float customJumpscareDistance = 1.75f,
         float customJumpscareDuration = 3.0f,
-        float customStalkDuration = 8f,
+        float customSearchDuration = 7.5f,
         float customBrightness = 0.25f)
     {
         player = playerTarget;
-        moveSpeed = speed;
+        chaseSpeed = baseChaseSpeed;
+        patrolSpeed = baseChaseSpeed * 0.68f;
+        investigateSpeed = baseChaseSpeed * 0.85f;
+        searchSpeed = baseChaseSpeed * 0.76f;
         stunDuration = stunTime;
+
         catchClip = onCatchMp3;
         catchVolume = onCatchVol;
-        AssignedQuarter = quarterIndex;
-        Role = role;
-        IsOutOfSegment = false;
+        homeSectorIndex = assignedSector;
 
         jumpscareCameraHeight = customJumpscareHeight;
         jumpscareDistance = customJumpscareDistance;
         jumpscareDuration = customJumpscareDuration;
-        stalkDuration = customStalkDuration;
+        searchDuration = customSearchDuration;
         enemyBrightness = customBrightness;
 
-        StartStalkingPhase();
+        if (player != null)
+        {
+            previousPlayerPos = player.position;
+        }
+
         ApplyDarkTintToModel(enemyBrightness);
 
         bodyCollider = gameObject.GetComponent<CapsuleCollider>();
@@ -110,7 +159,8 @@ public class GoblinEnemy : MonoBehaviour
         eerieLight.type = LightType.Point;
         eerieLight.color = new Color(1f, 0.2f, 0.1f, 1f);
         eerieLight.range = 1.8f;
-        eerieLight.intensity = 0.45f;
+        eerieLight.intensity = 0.5f;
+        eerieLight.shadows = LightShadows.None;
 
         if (ambientMp3 != null)
         {
@@ -125,24 +175,345 @@ public class GoblinEnemy : MonoBehaviour
             monsterAmbientSource.volume = ambientVol;
             monsterAmbientSource.Play();
         }
+
+        EnterPatrolState();
     }
 
-    public void StartStalkingPhase()
+    private void Update()
     {
-        isHunting = false;
-        stalkTimer = stalkDuration * Random.Range(0.9f, 1.15f);
-        if (eerieLight != null)
+        if (player == null || isPlayerDying) return;
+
+        Vector3 playerFrameDelta = player.position - previousPlayerPos;
+        playerFrameDelta.y = 0f;
+        float playerCurrentSpeed = playerFrameDelta.magnitude / Mathf.Max(0.0001f, Time.deltaTime);
+        Vector3 playerMoveDir = playerFrameDelta.sqrMagnitude > 0.0001f ? playerFrameDelta.normalized : player.forward;
+        previousPlayerPos = player.position;
+
+        if (currentState == AIState.Stunned)
         {
-            eerieLight.intensity = 0.45f;
-            eerieLight.color = new Color(0.8f, 0.15f, 0.1f, 1f);
+            stunTimer -= Time.deltaTime;
+            float wobbleX = Mathf.Sin(Time.time * 8f) * 12f - 25f;
+            float wobbleZ = Mathf.Cos(Time.time * 8f) * 12f;
+            transform.localRotation = Quaternion.Euler(wobbleX, transform.eulerAngles.y, wobbleZ);
+
+            if (stunTimer <= 0f)
+            {
+                RecoverFromStun();
+            }
+            return;
+        }
+
+        bool playerProtectedInSafeZone = MazeGenerator.Instance != null && MazeGenerator.Instance.IsPlayerInSafeZone();
+
+        float dist3DToPlayer = Vector3.Distance(
+            new Vector3(transform.position.x, player.position.y, transform.position.z),
+            player.position
+        );
+
+        if (!playerProtectedInSafeZone && !isPlayerDying && dist3DToPlayer <= killDistance)
+        {
+            if (MazeGenerator.Instance == null || MazeGenerator.Instance.HasCorridorLineOfSight(transform.position, player.position))
+            {
+                isPlayerDying = true;
+                StartCoroutine(KillPlayerRoutine());
+                return;
+            }
+        }
+
+        bool perceivesPlayerNow = CanPerceivePlayer(playerCurrentSpeed, playerProtectedInSafeZone, out Vector3 sensedPlayerPos);
+
+        if (perceivesPlayerNow)
+        {
+            lastKnownPlayerPosition = sensedPlayerPos;
+            lastSeenPlayerMoveDir = playerMoveDir;
+            timeSinceLastSawPlayer = 0f;
+
+            if (currentState != AIState.Chase)
+            {
+                EnterChaseState();
+            }
+        }
+        else
+        {
+            timeSinceLastSawPlayer += Time.deltaTime;
+        }
+
+        switch (currentState)
+        {
+            case AIState.Chase:
+                UpdateChaseState(playerProtectedInSafeZone);
+                break;
+
+            case AIState.InvestigateLastKnown:
+                UpdateInvestigateState();
+                break;
+
+            case AIState.SearchNearbyRoutes:
+                UpdateSearchState();
+                break;
+
+            case AIState.Patrol:
+                UpdatePatrolState();
+                break;
         }
     }
 
-    // Llamado cuando el jugador avanza a otro cuarto del laberinto: el enemigo se queda quieto y hace despawn cuando no lo miras
-    public void MarkAsOutOfSegment()
+    private bool CanPerceivePlayer(float playerSpeed, bool playerProtectedInSafeZone, out Vector3 sensedPos)
     {
-        IsOutOfSegment = true;
-        isHunting = false;
+        sensedPos = Vector3.zero;
+        if (player == null || playerProtectedInSafeZone) return false;
+
+        Vector3 toPlayer = player.position - transform.position;
+        toPlayer.y = 0f;
+        float distance = toPlayer.magnitude;
+
+        if (distance > visionRange) return false;
+
+        bool hasCorridorLOS = MazeGenerator.Instance != null
+            ? MazeGenerator.Instance.HasCorridorLineOfSight(transform.position, player.position)
+            : true;
+
+        if (distance <= closeProximitySenseRange && hasCorridorLOS)
+        {
+            sensedPos = player.position;
+            return true;
+        }
+
+        if (playerSpeed > 4.0f && distance <= hearingRangeRunning)
+        {
+            sensedPos = player.position;
+            return true;
+        }
+
+        float angleToPlayer = Vector3.Angle(transform.forward, toPlayer.normalized);
+        if (angleToPlayer <= visionAngle * 0.5f && hasCorridorLOS)
+        {
+            Vector3 eyeOrigin = transform.position + Vector3.up * 1.0f;
+            Vector3 targetChest = player.position + Vector3.up * 0.4f;
+            Vector3 rayDir = (targetChest - eyeOrigin).normalized;
+
+            if (!Physics.Raycast(eyeOrigin, rayDir, out RaycastHit hit, distance))
+            {
+                sensedPos = player.position;
+                return true;
+            }
+            if (hit.transform == player || hit.transform.IsChildOf(player))
+            {
+                sensedPos = player.position;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void EnterChaseState()
+    {
+        currentState = AIState.Chase;
+        pathUpdateTimer = 0f;
+        if (eerieLight != null)
+        {
+            eerieLight.color = new Color(1f, 0.15f, 0.08f, 1f);
+            eerieLight.intensity = 1.4f;
+        }
+    }
+
+    private void UpdateChaseState(bool playerInSafeZone)
+    {
+        if (playerInSafeZone || timeSinceLastSawPlayer > loseSightGraceTime)
+        {
+            EnterInvestigateLastKnownState();
+            return;
+        }
+
+        currentTargetPosition = lastKnownPlayerPosition;
+        MoveAlongMazeCorridors(currentTargetPosition, chaseSpeed, true);
+    }
+
+    private void EnterInvestigateLastKnownState()
+    {
+        currentState = AIState.InvestigateLastKnown;
+        pathUpdateTimer = 0f;
+
+        if (MazeGenerator.Instance != null && MazeGenerator.Instance.IsPositionInSafeZone3D(lastKnownPlayerPosition, 0.8f))
+        {
+            EnterPatrolState();
+            return;
+        }
+
+        currentTargetPosition = lastKnownPlayerPosition;
+        if (eerieLight != null)
+        {
+            eerieLight.color = new Color(1f, 0.45f, 0.1f, 1f);
+            eerieLight.intensity = 0.9f;
+        }
+    }
+
+    private void UpdateInvestigateState()
+    {
+        float distToLastKnown = Vector2.Distance(
+            new Vector2(transform.position.x, transform.position.z),
+            new Vector2(currentTargetPosition.x, currentTargetPosition.z)
+        );
+
+        if (distToLastKnown <= 0.75f)
+        {
+            EnterSearchNearbyRoutesState();
+            return;
+        }
+
+        MoveAlongMazeCorridors(currentTargetPosition, investigateSpeed, true);
+    }
+
+    private void EnterSearchNearbyRoutesState()
+    {
+        currentState = AIState.SearchNearbyRoutes;
+        stateTimer = searchDuration;
+        searchBranchQueue.Clear();
+
+        if (MazeGenerator.Instance != null)
+        {
+            List<Vector3> neighbors = MazeGenerator.Instance.GetConnectedCorridorPositions(transform.position, true);
+
+            neighbors.Sort((a, b) =>
+            {
+                Vector3 dirA = (a - transform.position).normalized;
+                Vector3 dirB = (b - transform.position).normalized;
+                float dotA = Vector3.Dot(dirA, lastSeenPlayerMoveDir);
+                float dotB = Vector3.Dot(dirB, lastSeenPlayerMoveDir);
+                return dotB.CompareTo(dotA);
+            });
+
+            foreach (Vector3 branchPos in neighbors)
+            {
+                searchBranchQueue.Enqueue(branchPos);
+            }
+        }
+
+        PickNextSearchBranch();
+    }
+
+    private void PickNextSearchBranch()
+    {
+        if (searchBranchQueue.Count > 0)
+        {
+            currentTargetPosition = searchBranchQueue.Dequeue();
+            pathUpdateTimer = 0f;
+        }
+        else if (MazeGenerator.Instance != null)
+        {
+            List<Vector3> branches = MazeGenerator.Instance.GetConnectedCorridorPositions(transform.position, true);
+            if (branches.Count > 0)
+            {
+                currentTargetPosition = branches[Random.Range(0, branches.Count)];
+                pathUpdateTimer = 0f;
+            }
+        }
+    }
+
+    private void UpdateSearchState()
+    {
+        stateTimer -= Time.deltaTime;
+        if (stateTimer <= 0f)
+        {
+            EnterPatrolState();
+            return;
+        }
+
+        float distToBranch = Vector2.Distance(
+            new Vector2(transform.position.x, transform.position.z),
+            new Vector2(currentTargetPosition.x, currentTargetPosition.z)
+        );
+
+        if (distToBranch <= 0.65f)
+        {
+            PickNextSearchBranch();
+        }
+
+        MoveAlongMazeCorridors(currentTargetPosition, searchSpeed, true);
+    }
+
+    private void EnterPatrolState()
+    {
+        currentState = AIState.Patrol;
+        if (eerieLight != null)
+        {
+            eerieLight.color = new Color(0.85f, 0.2f, 0.1f, 1f);
+            eerieLight.intensity = 0.5f;
+        }
+
+        PickNewPatrolDestination();
+    }
+
+    private void PickNewPatrolDestination()
+    {
+        if (MazeGenerator.Instance != null)
+        {
+            currentTargetPosition = MazeGenerator.Instance.GetRandomPatrolPointInSector(homeSectorIndex, transform.position, 10f);
+            pathUpdateTimer = 0f;
+        }
+    }
+
+    private void UpdatePatrolState()
+    {
+        float distToPatrolTarget = Vector2.Distance(
+            new Vector2(transform.position.x, transform.position.z),
+            new Vector2(currentTargetPosition.x, currentTargetPosition.z)
+        );
+
+        if (distToPatrolTarget <= 0.9f)
+        {
+            PickNewPatrolDestination();
+        }
+
+        MoveAlongMazeCorridors(currentTargetPosition, patrolSpeed, true);
+    }
+
+    private void MoveAlongMazeCorridors(Vector3 destination, float speed, bool avoidSafeZone)
+    {
+        pathUpdateTimer -= Time.deltaTime;
+        if (pathUpdateTimer <= 0f && MazeGenerator.Instance != null)
+        {
+            currentStepWaypoint = MazeGenerator.Instance.GetNextPathStep(transform.position, destination, avoidSafeZone);
+            pathUpdateTimer = pathUpdateInterval;
+        }
+
+        if (MazeGenerator.Instance != null && MazeGenerator.Instance.IsPositionInSafeZone3D(currentStepWaypoint, 0.5f))
+        {
+            PickNewPatrolDestination();
+            return;
+        }
+
+        Vector3 moveDir = currentStepWaypoint - transform.position;
+        moveDir.y = 0f;
+
+        if (moveDir.sqrMagnitude > 0.0001f)
+        {
+            moveDir.Normalize();
+        }
+
+        Vector3 candidateNextPos = transform.position + moveDir * (speed * Time.deltaTime);
+        if (MazeGenerator.Instance != null && MazeGenerator.Instance.IsPositionInSafeZone3D(candidateNextPos, 0.4f))
+        {
+            PickNewPatrolDestination();
+            return;
+        }
+
+        transform.position = candidateNextPos;
+
+        if (moveDir.sqrMagnitude > 0.001f)
+        {
+            Quaternion targetRot = Quaternion.LookRotation(moveDir);
+            bool isChasing = (currentState == AIState.Chase);
+            walkAnimPhase += Time.deltaTime * (isChasing ? 18f : 12f);
+            float swayZ = Mathf.Sin(walkAnimPhase) * 9f;
+            float leanForward = isChasing ? 15f : 8f;
+            transform.rotation = Quaternion.Slerp(transform.rotation, targetRot * Quaternion.Euler(leanForward, 0f, swayZ), Time.deltaTime * 10f);
+
+            Vector3 pos = transform.position;
+            pos.y = Mathf.Abs(Mathf.Sin(walkAnimPhase)) * 0.08f;
+            transform.position = pos;
+        }
     }
 
     private void ApplyDarkTintToModel(float brightness)
@@ -152,6 +523,7 @@ public class GoblinEnemy : MonoBehaviour
         {
             foreach (Material mat in rend.materials)
             {
+                mat.enableInstancing = true;
                 if (mat.HasProperty("_Color"))
                 {
                     Color c = mat.GetColor("_Color");
@@ -174,189 +546,11 @@ public class GoblinEnemy : MonoBehaviour
         }
     }
 
-    private void Update()
-    {
-        if (player == null || isPlayerDying) return;
-
-        Vector3 toPlayer = player.position - transform.position;
-        toPlayer.y = 0f;
-        float distanceToPlayer = toPlayer.magnitude;
-
-        // 1. Si el jugador ya salió del cuarto de este enemigo, se queda quieto y desaparece cuando no lo estás viendo
-        if (IsOutOfSegment)
-        {
-            LookAtPlayerQuietly(toPlayer);
-            if (!IsVisibleToPlayerCamera() || distanceToPlayer > 18f)
-            {
-                Destroy(gameObject);
-            }
-            return;
-        }
-
-        // 2. Si está aturdido por una roca
-        if (isStunned)
-        {
-            stunTimer -= Time.deltaTime;
-            float wobbleX = Mathf.Sin(Time.time * 8f) * 12f - 25f;
-            float wobbleZ = Mathf.Cos(Time.time * 8f) * 12f;
-            transform.localRotation = Quaternion.Euler(wobbleX, transform.eulerAngles.y, wobbleZ);
-
-            if (stunTimer <= 0f)
-            {
-                RecoverFromStun();
-            }
-            return;
-        }
-
-        // 3. Comprobamos si el jugador está en la Zona Segura del Street Light central
-        bool playerInSafeZone = MazeGenerator.Instance != null && MazeGenerator.Instance.IsPlayerInSafeZone();
-        bool monsterNearSafeZone = MazeGenerator.Instance != null && MazeGenerator.Instance.IsPositionInSafeZone(transform.position, 1.2f);
-
-        if (playerInSafeZone || monsterNearSafeZone)
-        {
-            // En la zona segura todos los monstruos se fuerzan a modo acecho y no pueden entrar al radio de luz
-            isHunting = false;
-            stalkTimer = Mathf.Max(stalkTimer, 4.0f);
-            if (eerieLight != null) eerieLight.intensity = 0.45f;
-
-            if (monsterNearSafeZone || distanceToPlayer <= stalkKeepDistance)
-            {
-                LookAtPlayerQuietly(toPlayer);
-                return;
-            }
-        }
-
-        // 4. Ataque si llega a distancia de captura (y el jugador no está bajo el Street Light)
-        if (!playerInSafeZone && !isPlayerDying && distanceToPlayer <= killDistance)
-        {
-            isPlayerDying = true;
-            StartCoroutine(KillPlayerRoutine());
-            return;
-        }
-
-        // 5. Temporizador de Acecho -> Caza definitiva
-        if (!isHunting && !playerInSafeZone)
-        {
-            stalkTimer -= Time.deltaTime;
-            if (stalkTimer <= 0f)
-            {
-                isHunting = true;
-                if (eerieLight != null)
-                {
-                    eerieLight.intensity = 1.35f;
-                }
-            }
-        }
-
-        Vector3 desiredDestination;
-        float currentSpeed;
-
-        if (!isHunting)
-        {
-            // MODO ACECHO:
-            // Si su rol es Frontal, se acerca desde adelante hasta quedar a distancia de acecho frente a ti;
-            // Si su rol es Trasero, busca posicionarse a tu espalda.
-            if (distanceToPlayer <= stalkKeepDistance && distanceToPlayer >= 4.2f)
-            {
-                LookAtPlayerQuietly(toPlayer);
-                return;
-            }
-
-            if (Role == StalkDirectionRole.RearStalker)
-            {
-                desiredDestination = player.position - (player.forward * stalkKeepDistance);
-                desiredDestination.y = 0f;
-            }
-            else
-            {
-                desiredDestination = player.position + (player.forward * (stalkKeepDistance * 0.7f));
-                desiredDestination.y = 0f;
-            }
-
-            currentSpeed = moveSpeed * 0.95f;
-        }
-        else
-        {
-            // MODO CAZA DEFINITIVA: Va directo hacia el jugador
-            desiredDestination = player.position;
-            currentSpeed = moveSpeed * huntSpeedMultiplier;
-        }
-
-        Vector3 nextWaypoint = desiredDestination;
-        if (MazeGenerator.Instance != null)
-        {
-            nextWaypoint = MazeGenerator.Instance.GetNextPathStep(transform.position, desiredDestination);
-        }
-
-        // Evita pisar dentro del círculo del Street Light central
-        if (MazeGenerator.Instance != null && MazeGenerator.Instance.IsPositionInSafeZone(nextWaypoint, 0.5f))
-        {
-            LookAtPlayerQuietly(toPlayer);
-            return;
-        }
-
-        Vector3 moveDir = nextWaypoint - transform.position;
-        moveDir.y = 0f;
-        if (moveDir.sqrMagnitude > 0.0001f)
-        {
-            moveDir.Normalize();
-        }
-
-        transform.position += moveDir * (currentSpeed * Time.deltaTime);
-
-        if (moveDir.sqrMagnitude > 0.001f)
-        {
-            Quaternion targetRot = Quaternion.LookRotation(moveDir);
-            walkAnimPhase += Time.deltaTime * (isHunting ? 18f : 12f);
-            float swayZ = Mathf.Sin(walkAnimPhase) * 9f;
-            float leanForward = isHunting ? 16f : 8f;
-            transform.rotation = Quaternion.Slerp(transform.rotation, targetRot * Quaternion.Euler(leanForward, 0f, swayZ), Time.deltaTime * 10f);
-
-            Vector3 pos = transform.position;
-            pos.y = Mathf.Abs(Mathf.Sin(walkAnimPhase)) * 0.08f;
-            transform.position = pos;
-        }
-    }
-
-    private bool IsVisibleToPlayerCamera()
-    {
-        Camera cam = Camera.main;
-        if (cam == null) return false;
-
-        Vector3 dirToEnemy = (transform.position + Vector3.up * 0.8f) - cam.transform.position;
-        float angle = Vector3.Angle(cam.transform.forward, dirToEnemy);
-        if (angle > 55f) return false;
-
-        // Si hay una pared de árboles tapando la vista entre el jugador y el enemigo, no lo está viendo
-        if (Physics.Raycast(cam.transform.position, dirToEnemy.normalized, out RaycastHit hit, dirToEnemy.magnitude))
-        {
-            if (hit.transform != transform && !hit.transform.IsChildOf(transform))
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private void LookAtPlayerQuietly(Vector3 toPlayer)
-    {
-        if (toPlayer.sqrMagnitude > 0.001f)
-        {
-            Quaternion lookRot = Quaternion.LookRotation(toPlayer.normalized);
-            float breathe = Mathf.Sin(Time.time * 3f) * 2.5f;
-            transform.rotation = Quaternion.Slerp(transform.rotation, lookRot * Quaternion.Euler(breathe, 0f, 0f), Time.deltaTime * 6f);
-
-            Vector3 pos = transform.position;
-            pos.y = 0f;
-            transform.position = pos;
-        }
-    }
-
     public void Stun(float customDuration = -1f)
     {
         if (isPlayerDying) return;
 
-        isStunned = true;
+        currentState = AIState.Stunned;
         stunTimer = customDuration > 0f ? customDuration : stunDuration;
 
         if (bodyCollider != null) bodyCollider.isTrigger = true;
@@ -370,7 +564,6 @@ public class GoblinEnemy : MonoBehaviour
 
     private void RecoverFromStun()
     {
-        isStunned = false;
         if (bodyCollider != null) bodyCollider.isTrigger = false;
 
         Vector3 euler = transform.eulerAngles;
@@ -379,21 +572,23 @@ public class GoblinEnemy : MonoBehaviour
         pos.y = 0f;
         transform.position = pos;
 
-        StartStalkingPhase();
-
         if (monsterAmbientSource != null)
         {
             monsterAmbientSource.UnPause();
         }
+
+        lastKnownPlayerPosition = transform.position;
+        EnterSearchNearbyRoutesState();
     }
 
     private IEnumerator KillPlayerRoutine()
     {
-        moveSpeed = 0f;
         isPlayerDying = true;
 
-        foreach (GoblinEnemy other in FindObjectsOfType<GoblinEnemy>())
+        for (int i = 0; i < AllActiveEnemies.Count; i++)
         {
+            GoblinEnemy other = AllActiveEnemies[i];
+            if (other == null) continue;
             if (other.monsterAmbientSource != null)
             {
                 other.monsterAmbientSource.Stop();

@@ -1,4 +1,3 @@
-using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -60,7 +59,6 @@ public class EnemyProximityArcIndicator : MonoBehaviour
 
         for (int py = 0; py < size; py++)
         {
-            // Coordenadas normalizadas [-1, 1] con +Y apuntando hacia arriba (frente del jugador)
             float y = ((py + 0.5f) / size) * 2f - 1f;
 
             for (int px = 0; px < size; px++)
@@ -76,7 +74,6 @@ public class EnemyProximityArcIndicator : MonoBehaviour
                     continue;
                 }
 
-                // Ángulo respecto a la parte superior (+Y = 0 grados = Al Frente)
                 float angleFromTop = Mathf.Abs(Mathf.Atan2(x, y) * Mathf.Rad2Deg);
                 if (angleFromTop > halfAngle)
                 {
@@ -84,7 +81,6 @@ public class EnemyProximityArcIndicator : MonoBehaviour
                     continue;
                 }
 
-                // Suavizado radial y en las puntas del arco para que se vea limpio y moderno
                 float radialAlpha = 1f - Mathf.Pow(distToRing / halfThick, 1.6f);
                 float angularAlpha = 1f - Mathf.Pow(angleFromTop / halfAngle, 2.2f);
                 float finalAlpha = Mathf.Clamp01(radialAlpha * angularAlpha);
@@ -101,13 +97,14 @@ public class EnemyProximityArcIndicator : MonoBehaviour
     {
         if (Time.timeSinceLevelLoad < 0.2f) return;
 
+        // Usamos la lista estática directa sin llamar jamás a FindObjectsOfType
+        List<GoblinEnemy> enemies = GoblinEnemy.AllActiveEnemies;
+        if (enemies == null || enemies.Count == 0) return;
+
         if (arcTexture == null || !Mathf.Approximately(cachedArcSpan, arcAngleSpan) || !Mathf.Approximately(cachedThickness, arcThickness))
         {
             RebuildArcTexture();
         }
-
-        GoblinEnemy[] enemies = FindObjectsOfType<GoblinEnemy>();
-        if (enemies == null || enemies.Length == 0) return;
 
         Vector2 screenCenter = new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
         Rect drawRect = new Rect(
@@ -122,8 +119,9 @@ public class EnemyProximityArcIndicator : MonoBehaviour
 
         if (showAllNearbyEnemies)
         {
-            foreach (GoblinEnemy enemy in enemies)
+            for (int i = 0; i < enemies.Count; i++)
             {
+                GoblinEnemy enemy = enemies[i];
                 if (enemy == null || !enemy.gameObject.activeInHierarchy) continue;
 
                 float dist = Vector3.Distance(transform.position, enemy.transform.position);
@@ -135,13 +133,14 @@ public class EnemyProximityArcIndicator : MonoBehaviour
         }
         else
         {
-            // Solo el enemigo más cercano
             GoblinEnemy closest = null;
             float minDist = detectionRadius;
 
-            foreach (GoblinEnemy enemy in enemies)
+            for (int i = 0; i < enemies.Count; i++)
             {
+                GoblinEnemy enemy = enemies[i];
                 if (enemy == null || !enemy.gameObject.activeInHierarchy) continue;
+
                 float d = Vector3.Distance(transform.position, enemy.transform.position);
                 if (d <= minDist)
                 {
@@ -169,10 +168,8 @@ public class EnemyProximityArcIndicator : MonoBehaviour
         Vector3 playerForward = transform.forward;
         playerForward.y = 0f;
 
-        // 0° = Frente (Arriba), +90° = Derecha, -90° = Izquierda, 180° = Detrás (Abajo)
         float signedAngle = Vector3.SignedAngle(playerForward.normalized, toEnemy.normalized, Vector3.up);
 
-        // Mientras más cerca está el monstruo, más intenso y opaco se ve el arco
         float proximityFactor = Mathf.Clamp01(1f - (distance / detectionRadius));
         float pulse = 0.85f + Mathf.Sin(Time.time * 7f) * 0.15f;
         float finalAlpha = Mathf.Clamp01(Mathf.Lerp(0.2f, 1f, proximityFactor) * arcColor.a * pulse);
