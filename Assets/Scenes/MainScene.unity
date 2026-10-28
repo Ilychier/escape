@@ -1492,11 +1492,11 @@ MonoBehaviour:
   - {fileID: 1264443996888144, guid: e57ff2a222c0ed44ea41cc22b40f0b81, type: 3}
   playerTransform: {fileID: 1973995886}
   initialSpawnDelay: 10
-  maxActiveGoblins: 2
-  spawnInterval: 6
-  minSpawnDistanceFromPlayer: 18
-  maxSpawnDistanceFromPlayer: 22
-  maxPatrolLeashDistance: 32
+  maxActiveGoblins: 3
+  spawnInterval: 5
+  minSpawnDistanceFromPlayer: 10
+  maxSpawnDistanceFromPlayer: 18
+  maxPatrolLeashDistance: 24
   goblinChaseSpeed: 3.5
   goblinStunDuration: 3
   searchDurationAfterLosingSight: 7.5

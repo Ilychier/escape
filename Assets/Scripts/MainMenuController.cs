@@ -10,12 +10,16 @@ public class MainMenuController : MonoBehaviour
     [SerializeField] private GameObject panelMenu;
     [Tooltip("2. Arrastra aquí tu Panel_Instructions (el tutorial de controles)")]
     [SerializeField] private GameObject panelInstructions;
-    [Tooltip("3. Arrastra aquí tu nuevo panel con la frase en inglés ('STALK THEM BEFORE THEY STALK YOU')")]
+    [Tooltip("3. Arrastra aquí tu NUEVO panel (que va entre el tutorial y la advertencia)")]
+    [SerializeField] private GameObject panelInBetween; // <-- NUEVA VARIABLE
+    [Tooltip("4. Arrastra aquí tu panel con la frase en inglés ('STALK THEM BEFORE THEY STALK YOU')")]
     [SerializeField] private GameObject panelStalkWarning;
 
     [Header("Tiempos y Escena")]
     [Tooltip("Segundos que se muestra el panel de instrucciones")]
     [SerializeField] private float instructionsDuration = 5.0f;
+    [Tooltip("Segundos que se muestra el nuevo panel intermedio")]
+    [SerializeField] private float inBetweenDuration = 4.0f; // <-- NUEVA DURACIÓN
     [Tooltip("Segundos que se muestra la frase de advertencia antes de entrar al laberinto")]
     [SerializeField] private float stalkWarningDuration = 3.0f;
     [Tooltip("Nombre exacto de la escena del laberinto en Build Settings")]
@@ -37,6 +41,12 @@ public class MainMenuController : MonoBehaviour
             if (foundInst != null) panelInstructions = foundInst.gameObject;
         }
 
+        if (panelInBetween == null) // <-- Búsqueda automática del nuevo panel
+        {
+            Transform foundInBetween = transform.Find("Panel_InBetween");
+            if (foundInBetween != null) panelInBetween = foundInBetween.gameObject;
+        }
+
         if (panelStalkWarning == null)
         {
             Transform foundWarn = transform.Find("Panel_Warning");
@@ -46,6 +56,7 @@ public class MainMenuController : MonoBehaviour
         // Estado inicial al abrir el menú: solo el menú principal visible
         if (panelMenu != null) panelMenu.SetActive(true);
         if (panelInstructions != null) panelInstructions.SetActive(false);
+        if (panelInBetween != null) panelInBetween.SetActive(false); // <-- Asegurar que inicia oculto
         if (panelStalkWarning != null) panelStalkWarning.SetActive(false);
     }
 
@@ -66,15 +77,24 @@ public class MainMenuController : MonoBehaviour
     {
         isTransitioning = true;
 
-        // Fase 1: Ocultar Menú y mostrar Tutorial de Instrucciones
+        // Fase 1: Ocultar Menú y mostrar Tutorial de Instrucciones (Arco del tiro, etc.)
         if (panelMenu != null) panelMenu.SetActive(false);
         if (panelInstructions != null) panelInstructions.SetActive(true);
+        if (panelInBetween != null) panelInBetween.SetActive(false);
         if (panelStalkWarning != null) panelStalkWarning.SetActive(false);
 
         yield return new WaitForSeconds(instructionsDuration);
 
-        // Fase 2: Ocultar Tutorial y mostrar el panel con la frase "STALK THEM BEFORE THEY STALK YOU"
+        // Fase 1.5: Ocultar Tutorial y mostrar el NUEVO panel intermedio
         if (panelInstructions != null) panelInstructions.SetActive(false);
+        if (panelInBetween != null)
+        {
+            panelInBetween.SetActive(true);
+            yield return new WaitForSeconds(inBetweenDuration);
+        }
+
+        // Fase 2: Ocultar panel intermedio y mostrar la advertencia "STALK THEM BEFORE THEY STALK YOU"
+        if (panelInBetween != null) panelInBetween.SetActive(false);
         if (panelStalkWarning != null)
         {
             panelStalkWarning.SetActive(true);

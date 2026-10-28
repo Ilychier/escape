@@ -12,17 +12,17 @@ public class GoblinSpawner : MonoBehaviour
 
     [Header("Distribución de Patrullas Cercanas")]
     [Tooltip("Segundos de gracia al inicio de la partida antes de desplegar el primer enemigo")]
-    [SerializeField] private float initialSpawnDelay = 6f;
+    [SerializeField] private float initialSpawnDelay = 1.5f;
     [Tooltip("Cantidad total de enemigos activos patrullando tu zona")]
     [SerializeField] private int maxActiveGoblins = 5;
     [Tooltip("Intervalo en segundos entre la aparición de cada enemigo")]
-    [SerializeField] private float spawnInterval = 4f;
+    [SerializeField] private float spawnInterval = 2.0f;
     [Tooltip("Distancia mínima respecto al jugador al aparecer")]
-    [SerializeField] private float minSpawnDistanceFromPlayer = 12f;
+    [SerializeField] private float minSpawnDistanceFromPlayer = 10f;
     [Tooltip("Distancia máxima respecto al jugador al aparecer o reubicarse")]
-    [SerializeField] private float maxSpawnDistanceFromPlayer = 22f;
+    [SerializeField] private float maxSpawnDistanceFromPlayer = 18f;
     [Tooltip("Si un enemigo en patrulla se queda atrás a más de esta distancia, pasa a patrullar una intersección más cercana")]
-    [SerializeField] private float maxPatrolLeashDistance = 32f;
+    [SerializeField] private float maxPatrolLeashDistance = 24f;
 
     [Header("Parámetros de IA y Búsqueda")]
     [SerializeField] private float goblinChaseSpeed = 2.9f;
@@ -56,6 +56,8 @@ public class GoblinSpawner : MonoBehaviour
 
     private void Start()
     {
+        GoblinEnemy.ResetDeathState();
+
         if (playerTransform == null && Camera.main != null)
         {
             playerTransform = Camera.main.transform.root;
@@ -65,7 +67,15 @@ public class GoblinSpawner : MonoBehaviour
     }
 
     private void Update()
-    {
+    {   
+        // Si el jugador murió, desactivar el spawner por completo
+        if (GoblinEnemy.IsPlayerDying)
+        {
+            ClearAllActiveGoblins();
+            enabled = false;
+            return;
+        }
+
         if (allowDebugCheatF2 && Input.GetKeyDown(KeyCode.F2))
         {
             spawningDisabledByCheat = !spawningDisabledByCheat;

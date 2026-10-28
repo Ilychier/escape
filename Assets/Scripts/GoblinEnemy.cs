@@ -42,7 +42,7 @@ public class GoblinEnemy : MonoBehaviour
     [Range(0.05f, 1f)]
     [SerializeField] private float enemyBrightness = 0.25f;
 
-    [Header("Escena de Jumpscare (Fondo Negro)")]
+    [Header("Escena de Jumpscare")]
     [SerializeField] private float jumpscareCameraHeight = 1.45f;
     [SerializeField] private float jumpscareDistance = 1.75f;
     [SerializeField] private float jumpscareDuration = 3.0f;
@@ -73,11 +73,17 @@ public class GoblinEnemy : MonoBehaviour
     private float stunTimer = 0f;
     private float walkAnimPhase = 0f;
     private static bool isPlayerDying = false;
+    public static bool IsPlayerDying => isPlayerDying;
 
     public AIState CurrentState => currentState;
     public bool IsStunned => currentState == AIState.Stunned;
 
     private void Awake()
+    {
+        isPlayerDying = false;
+    }
+
+    public static void ResetDeathState()
     {
         isPlayerDying = false;
     }
@@ -149,7 +155,7 @@ public class GoblinEnemy : MonoBehaviour
         lightObj.transform.localPosition = new Vector3(0f, 1.05f, 0.15f);
         eerieLight = lightObj.AddComponent<Light>();
         eerieLight.type = LightType.Point;
-        eerieLight.color = new Color(1f, 0.2f, 0.1f, 1f);
+        eerieLight.color = Color.black;
         eerieLight.range = 1.8f;
         eerieLight.intensity = 0.5f;
         eerieLight.shadows = LightShadows.None;
@@ -313,7 +319,7 @@ public class GoblinEnemy : MonoBehaviour
         pathUpdateTimer = 0f;
         if (eerieLight != null)
         {
-            eerieLight.color = new Color(1f, 0.15f, 0.08f, 1f);
+            eerieLight.color = Color.black;
             eerieLight.intensity = 1.4f;
         }
     }
@@ -344,7 +350,7 @@ public class GoblinEnemy : MonoBehaviour
         currentTargetPosition = lastKnownPlayerPosition;
         if (eerieLight != null)
         {
-            eerieLight.color = new Color(1f, 0.45f, 0.1f, 1f);
+            eerieLight.color = Color.black;
             eerieLight.intensity = 0.9f;
         }
     }
@@ -438,7 +444,7 @@ public class GoblinEnemy : MonoBehaviour
         currentState = AIState.Patrol;
         if (eerieLight != null)
         {
-            eerieLight.color = new Color(0.85f, 0.2f, 0.1f, 1f);
+            eerieLight.color = Color.black;
             eerieLight.intensity = 0.5f;
         }
 
@@ -587,17 +593,30 @@ public class GoblinEnemy : MonoBehaviour
     {
         isPlayerDying = true;
 
-        for (int i = 0; i < AllActiveEnemies.Count; i++)
+        // 1. Detener el Spawner para que no instancie nuevos enemigos con audio en segundo plano
+        GoblinSpawner spawner = FindObjectOfType<GoblinSpawner>();
+        if (spawner != null)
         {
-            GoblinEnemy other = AllActiveEnemies[i];
-            if (other == null) continue;
-            if (other.monsterAmbientSource != null)
+            spawner.enabled = false;
+        }
+
+        // 2. Apagar el audio ambiental de este enemigo (el que hace el jumpscare)
+        if (monsterAmbientSource != null)
+        {
+            monsterAmbientSource.Stop();
+        }
+
+        GoblinEnemy[] enemies = AllActiveEnemies.ToArray();
+        for (int i = 0; i < enemies.Length; i++)
+        {
+            GoblinEnemy other = enemies[i];
+            if (other != null && other != this)
             {
-                other.monsterAmbientSource.Stop();
-            }
-            if (other != this)
-            {
-                other.gameObject.SetActive(false);
+                if (other.monsterAmbientSource != null)
+                {
+                    other.monsterAmbientSource.Stop();
+                }
+                Destroy(other.gameObject);
             }
         }
 

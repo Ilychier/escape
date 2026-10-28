@@ -36,7 +36,8 @@ public class PauseManager : MonoBehaviour
 
     void Update()
     {
-        if (MazeGenerator.win)
+        // Bloquear la pausa si el jugador ganó, está en el jumpscare o en el panel de Game Over
+        if (MazeGenerator.win || GoblinEnemy.IsPlayerDying || (MazeGenerator.Instance != null && MazeGenerator.Instance.HasWon))
             return;
 
         bool pausePressed = Input.GetKeyDown(KeyCode.Escape) || Input.GetKeyDown(KeyCode.P);
@@ -61,7 +62,8 @@ public class PauseManager : MonoBehaviour
 
     public void PauseGame()
     {
-        if (IsGamePaused)
+        // Doble seguro para impedir que se active la pausa en Victoria o Game Over
+        if (IsGamePaused || MazeGenerator.win || GoblinEnemy.IsPlayerDying || (MazeGenerator.Instance != null && MazeGenerator.Instance.HasWon))
             return;
 
         IsGamePaused = true;
