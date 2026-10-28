@@ -5,41 +5,33 @@ using UnityEngine.SceneManagement;
 
 public class GoblinEnemy : MonoBehaviour
 {
-    // Lista estática rápida para que el indicador de arco en pantalla no tenga que llamar a FindObjectsOfType en cada fotograma
     public static readonly List<GoblinEnemy> AllActiveEnemies = new List<GoblinEnemy>();
 
     public enum AIState
     {
-        Patrol,               // Patrulla por intersecciones sin conocer la posición del jugador
+        Patrol,               // Patrulla por los pasillos cercanos a la zona activa sin conocer la celda exacta del jugador
         Chase,                // Persecución activa mientras tiene línea de visión o escucha cercana
         InvestigateLastKnown, // Va hasta la última posición donde vio o escuchó al jugador
-        SearchNearbyRoutes,   // Explora los pasillos y bifurcaciones adyacentes antes de rendirse
+        SearchNearbyRoutes,   // Explora los pasillos y bifurcaciones adyacentes antes de volver a patrullar
         Stunned               // Aturdido temporalmente por el impacto de una roca
     }
 
     [Header("Velocidades por Estado")]
-    [SerializeField] private float patrolSpeed = 1.95f;
-    [SerializeField] private float investigateSpeed = 2.4f;
-    [SerializeField] private float searchSpeed = 2.15f;
-    [SerializeField] private float chaseSpeed = 2.85f;
+    [SerializeField] private float patrolSpeed = 2.15f;
+    [SerializeField] private float investigateSpeed = 2.5f;
+    [SerializeField] private float searchSpeed = 2.25f;
+    [SerializeField] private float chaseSpeed = 2.9f;
 
     [Header("Percepción (Línea de Visión y Oído)")]
-    [Tooltip("Distancia máxima a la que puede verte en un pasillo despejado")]
-    [SerializeField] private float visionRange = 16.0f;
-    [Tooltip("Ángulo del cono de visión frontal en grados")]
+    [SerializeField] private float visionRange = 17.0f;
     [Range(60f, 170f)]
-    [SerializeField] private float visionAngle = 115f;
-    [Tooltip("Distancia a la que detecta pasos si el jugador va corriendo con Shift")]
-    [SerializeField] private float hearingRangeRunning = 8.5f;
-    [Tooltip("Distancia corta a la que percibe al jugador aunque vaya caminando")]
-    [SerializeField] private float closeProximitySenseRange = 2.6f;
-    [Tooltip("Tiempo de retención visual tras doblar una esquina antes de perder el rastro directo")]
-    [SerializeField] private float loseSightGraceTime = 0.55f;
+    [SerializeField] private float visionAngle = 120f;
+    [SerializeField] private float hearingRangeRunning = 10.0f;
+    [SerializeField] private float closeProximitySenseRange = 3.2f;
+    [SerializeField] private float loseSightGraceTime = 0.6f;
 
     [Header("Búsqueda e Investigación")]
-    [Tooltip("Segundos que explora las rutas cercanas a la última posición conocida antes de volver a patrullar")]
     [SerializeField] private float searchDuration = 7.5f;
-    [Tooltip("Frecuencia en segundos con la que recalcula el siguiente paso del camino")]
     [SerializeField] private float pathUpdateInterval = 0.2f;
 
     [Header("Captura y Aturdimiento")]
@@ -121,9 +113,9 @@ public class GoblinEnemy : MonoBehaviour
     {
         player = playerTarget;
         chaseSpeed = baseChaseSpeed;
-        patrolSpeed = baseChaseSpeed * 0.68f;
-        investigateSpeed = baseChaseSpeed * 0.85f;
-        searchSpeed = baseChaseSpeed * 0.76f;
+        patrolSpeed = baseChaseSpeed * 0.74f;
+        investigateSpeed = baseChaseSpeed * 0.88f;
+        searchSpeed = baseChaseSpeed * 0.78f;
         stunDuration = stunTime;
 
         catchClip = onCatchMp3;
@@ -181,6 +173,9 @@ public class GoblinEnemy : MonoBehaviour
 
     private void Update()
     {
+        if (PauseManager.IsGamePaused)
+        return;
+
         if (player == null || isPlayerDying) return;
 
         Vector3 playerFrameDelta = player.position - previousPlayerPos;
@@ -204,6 +199,11 @@ public class GoblinEnemy : MonoBehaviour
         }
 
         bool playerProtectedInSafeZone = MazeGenerator.Instance != null && MazeGenerator.Instance.IsPlayerInSafeZone();
+
+        if (monsterAmbientSource != null)
+        {
+            monsterAmbientSource.mute = playerProtectedInSafeZone;
+        }
 
         float dist3DToPlayer = Vector3.Distance(
             new Vector3(transform.position.x, player.position.y, transform.position.z),
@@ -433,7 +433,7 @@ public class GoblinEnemy : MonoBehaviour
         MoveAlongMazeCorridors(currentTargetPosition, searchSpeed, true);
     }
 
-    private void EnterPatrolState()
+    public void EnterPatrolState()
     {
         currentState = AIState.Patrol;
         if (eerieLight != null)
@@ -449,7 +449,9 @@ public class GoblinEnemy : MonoBehaviour
     {
         if (MazeGenerator.Instance != null)
         {
-            currentTargetPosition = MazeGenerator.Instance.GetRandomPatrolPointInSector(homeSectorIndex, transform.position, 10f);
+            // Elige intersecciones en un anillo táctico de 8 a 22 metros alrededor de la región donde se mueve el jugador
+            // Así nunca se queda patrullando esquinas vacías a 80 metros donde el jugador ya no está
+            currentTargetPosition = MazeGenerator.Instance.GetTacticalPatrolPointNearPlayer(transform.position, 8f, 22f);
             pathUpdateTimer = 0f;
         }
     }

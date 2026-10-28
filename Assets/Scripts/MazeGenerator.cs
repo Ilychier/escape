@@ -6,25 +6,24 @@ using UnityEngine.SceneManagement;
 public class MazeGenerator : MonoBehaviour
 {
     public static MazeGenerator Instance { get; private set; }
+    public static bool win = false;
 
-    [Header("Configuración del Laberinto (30x30 = 120x120 metros)")]
+    [Header("Configuración del Laberinto (22x22 = 88x88 metros recomendados)")]
     [SerializeField] private MazeCell mazeCellPrefab;
-    [SerializeField] private int mazeWidth = 30;
-    [SerializeField] private int mazeDepth = 30;
+    [SerializeField] private int mazeWidth = 22;
+    [SerializeField] private int mazeDepth = 22;
     [SerializeField] private float cellSize = 4f;
 
     [Header("Optimización para PC de Baja Gama (Distance Culling)")]
-    [Tooltip("Activa y desactiva automáticamente las celdas lejanas ocultas por la niebla para multiplicar los FPS")]
     [SerializeField] private bool enableCellDistanceCulling = true;
-    [Tooltip("Distancia en metros alrededor del jugador donde las celdas están encendidas (24m supera el alcance de la niebla)")]
-    [SerializeField] private float activeCellRadius = 24f;
+    [SerializeField] private float activeCellRadius = 26f;
 
-    [Header("Ciclos y Rutas Alternativas (Laberinto No Perfecto)")]
-    [Tooltip("Porcentaje de callejones sin salida que se abren para formar ciclos (0.60 = abre el 60% y conserva el 40% como callejones peligrosos)")]
+    [Header("Ciclos y Rutas Alternativas")]
+    [Tooltip("Porcentaje de callejones sin salida que se abren para formar ciclos")]
     [Range(0f, 0.9f)]
-    [SerializeField] private float deadEndRemovalRatio = 0.60f;
-    [Tooltip("Ciclos estratégicos mínimos garantizados en cada uno de los 4 cuadrantes del mapa")]
-    [SerializeField] private int guaranteedCyclesPerQuadrant = 8;
+    [SerializeField] private float deadEndRemovalRatio = 0.58f;
+    [Tooltip("Ciclos estratégicos mínimos garantizados en cada cuadrante")]
+    [SerializeField] private int guaranteedCyclesPerQuadrant = 6;
 
     [Header("Semilla Aleatoria (Opcional)")]
     [SerializeField] private bool useFixedSeed = false;
@@ -34,18 +33,20 @@ public class MazeGenerator : MonoBehaviour
     [SerializeField] private Transform playerTransform;
     [SerializeField] private float playerSpawnHeight = 0.5f;
 
-    [Header("Pistas Visuales (SignPosts y Fence Posts)")]
+    [Header("Pistas Visuales (SignPosts hacia Farola y Salida)")]
     [SerializeField] private GameObject signPostPrefab;
     [SerializeField] private float signPostRotationOffset = 0f;
-    [SerializeField] private int totalSignPosts = 4;
+    [SerializeField] private int totalSignPosts = 6;
     [SerializeField] private GameObject fencePostPrefab;
-    [SerializeField] private int fencePostInterval = 6;
+    [SerializeField] private int fencePostInterval = 5;
 
-    [Header("Farola Central: Zona Segura (3 metros de radio)")]
+    [Header("Farola Central: Zona Segura Obligatoria (3 metros de radio)")]
+    [Tooltip("Arrastra aquí tu prefab de Street Light")]
     [SerializeField] private GameObject streetLightPrefab;
+    [Tooltip("Radio exacto de protección en metros 3D alrededor de la farola central")]
     [SerializeField] private float safeZoneRadius = 3.0f;
-    [SerializeField] private Color streetLightColor = new Color(1f, 0.82f, 0.45f, 1f);
-    [SerializeField] private float streetLightIntensity = 5.0f;
+    [SerializeField] private Color streetLightColor = new Color(1f, 0.78f, 0.35f, 1f);
+    [SerializeField] private float streetLightIntensity = 6.5f;
 
     [Header("Edificio en la Salida y Panel de Victoria (Canvas)")]
     [SerializeField] private GameObject exitBuildingPrefab;
@@ -67,7 +68,6 @@ public class MazeGenerator : MonoBehaviour
     [SerializeField] private Color debugPathColor = new Color(0f, 1f, 0.4f, 1f);
 
     private MazeCell[,] mazeGrid;
-    // Máscara de bits de pasillos abiertos en memoria (1=Norte, 2=Sur, 4=Este, 8=Oeste) para que la IA navegue aunque la celda lejana esté oculta por optimización
     private byte[,] navConnectionsMask;
     private List<MazeCell> escapePathCells = new List<MazeCell>();
     private List<Vector3> escapePathPositions = new List<Vector3>();
@@ -80,6 +80,7 @@ public class MazeGenerator : MonoBehaviour
     private Texture2D whiteOverlayTex;
     private float cullingTimer = 0f;
 
+    public bool HasWon => hasWon;
     public int MazeWidth => mazeWidth;
     public int MazeDepth => mazeDepth;
     public float CellSize => cellSize;
@@ -92,6 +93,8 @@ public class MazeGenerator : MonoBehaviour
     private void Awake()
     {
         Instance = this;
+        hasWon = false;
+        win = false;
 
         if (victoryCanvasPanel != null)
         {
@@ -135,7 +138,6 @@ public class MazeGenerator : MonoBehaviour
 
     private IEnumerator EnableGpuInstancingAndInitialCullRoutine()
     {
-        // Esperamos un fotograma a que los decoradores de paredes instancien sus árboles y activamos GPU Instancing por código en todos sus materiales
         yield return null;
 
         Renderer[] allRenderers = GetComponentsInChildren<Renderer>(true);
@@ -163,6 +165,8 @@ public class MazeGenerator : MonoBehaviour
 
         Vector3 pPos = playerTransform.position;
         float radiusSq = activeCellRadius * activeCellRadius;
+        int centerX = mazeWidth / 2;
+        int centerZ = mazeDepth / 2;
 
         for (int x = 0; x < mazeWidth; x++)
         {
@@ -173,6 +177,12 @@ public class MazeGenerator : MonoBehaviour
             {
                 MazeCell cell = mazeGrid[x, z];
                 if (cell == null) continue;
+
+                if (Mathf.Abs(x - centerX) <= 1 && Mathf.Abs(z - centerZ) <= 1)
+                {
+                    if (!cell.gameObject.activeSelf) cell.gameObject.SetActive(true);
+                    continue;
+                }
 
                 float dz = (z * cellSize) - pPos.z;
                 bool shouldBeVisible = (dxSq + dz * dz) <= radiusSq;
@@ -230,28 +240,7 @@ public class MazeGenerator : MonoBehaviour
             }
         }
 
-        Stack<MazeCell> cellStack = new Stack<MazeCell>();
-        MazeCell currentCell = mazeGrid[0, 0];
-        currentCell.Visit();
-        cellStack.Push(currentCell);
-
-        while (cellStack.Count > 0)
-        {
-            currentCell = cellStack.Peek();
-            MazeCell nextCell = GetRandomUnvisitedNeighbor(currentCell);
-
-            if (nextCell != null)
-            {
-                RemoveWallBetween(currentCell, nextCell);
-                nextCell.Visit();
-                cellStack.Push(nextCell);
-            }
-            else
-            {
-                cellStack.Pop();
-            }
-        }
-
+        GenerateTwoHalvesConnectedByCentralPlaza();
         AddStrategicCyclesAndCentralHub();
 
         mazeGrid[mazeWidth - 1, mazeDepth - 1].ClearNorthWall();
@@ -263,9 +252,7 @@ public class MazeGenerator : MonoBehaviour
             mazeGrid[mazeWidth - 1, mazeDepth - 1].ClearWestWall();
         }
 
-        // Guardamos la topología de conexiones abiertas en memoria para que el culling de GameObjects no afecte jamás a la IA
         CacheNavigationConnectionsMask();
-
         ComputeShortestEscapeRouteBFS();
         VerifyMazeGraphAndCountCycles();
 
@@ -285,21 +272,56 @@ public class MazeGenerator : MonoBehaviour
         }
     }
 
-    private void CacheNavigationConnectionsMask()
+    private void GenerateTwoHalvesConnectedByCentralPlaza()
     {
-        for (int x = 0; x < mazeWidth; x++)
+        int midZ = mazeDepth / 2;
+
+        CarveRegionWithDFS(0, 0, 0, mazeWidth - 1, 0, midZ);
+
+        if (midZ + 1 < mazeDepth)
         {
-            for (int z = 0; z < mazeDepth; z++)
+            CarveRegionWithDFS(mazeWidth / 2, midZ + 1, 0, mazeWidth - 1, midZ + 1, mazeDepth - 1);
+        }
+    }
+
+    private void CarveRegionWithDFS(int startX, int startZ, int minX, int maxX, int minZ, int maxZ)
+    {
+        Stack<MazeCell> cellStack = new Stack<MazeCell>();
+        MazeCell startCell = mazeGrid[startX, startZ];
+        startCell.Visit();
+        cellStack.Push(startCell);
+
+        while (cellStack.Count > 0)
+        {
+            MazeCell current = cellStack.Peek();
+            MazeCell next = GetRandomUnvisitedNeighborInBounds(current, minX, maxX, minZ, maxZ);
+
+            if (next != null)
             {
-                MazeCell c = mazeGrid[x, z];
-                byte mask = 0;
-                if (z + 1 < mazeDepth && c.IsNorthOpen) mask |= 1;
-                if (z - 1 >= 0 && c.IsSouthOpen)        mask |= 2;
-                if (x + 1 < mazeWidth && c.IsEastOpen)  mask |= 4;
-                if (x - 1 >= 0 && c.IsWestOpen)         mask |= 8;
-                navConnectionsMask[x, z] = mask;
+                RemoveWallBetween(current, next);
+                next.Visit();
+                cellStack.Push(next);
+            }
+            else
+            {
+                cellStack.Pop();
             }
         }
+    }
+
+    private MazeCell GetRandomUnvisitedNeighborInBounds(MazeCell cell, int minX, int maxX, int minZ, int maxZ)
+    {
+        List<MazeCell> list = new List<MazeCell>(4);
+        int x = cell.GridX;
+        int z = cell.GridZ;
+
+        if (z + 1 <= maxZ && !mazeGrid[x, z + 1].IsVisited) list.Add(mazeGrid[x, z + 1]);
+        if (z - 1 >= minZ && !mazeGrid[x, z - 1].IsVisited) list.Add(mazeGrid[x, z - 1]);
+        if (x + 1 <= maxX && !mazeGrid[x + 1, z].IsVisited) list.Add(mazeGrid[x + 1, z]);
+        if (x - 1 >= minX && !mazeGrid[x - 1, z].IsVisited) list.Add(mazeGrid[x - 1, z]);
+
+        if (list.Count == 0) return null;
+        return list[Random.Range(0, list.Count)];
     }
 
     private void AddStrategicCyclesAndCentralHub()
@@ -356,7 +378,7 @@ public class MazeGenerator : MonoBehaviour
             MazeCell deadEnd = deadEnds[i];
             if (GetOpenPassageCount(deadEnd) > 1) continue;
 
-            List<MazeCell> closedNeighbors = GetClosedAdjacentNeighbors(deadEnd);
+            List<MazeCell> closedNeighbors = GetClosedAdjacentNeighborsSameHalf(deadEnd, centerZ);
             if (closedNeighbors.Count > 0)
             {
                 MazeCell chosenNeighbor = closedNeighbors[Random.Range(0, closedNeighbors.Count)];
@@ -398,7 +420,7 @@ public class MazeGenerator : MonoBehaviour
                 {
                     if (cyclesAdded >= guaranteedCyclesPerQuadrant) break;
 
-                    List<MazeCell> closedNeighbors = GetClosedAdjacentNeighbors(candidate);
+                    List<MazeCell> closedNeighbors = GetClosedAdjacentNeighborsSameHalf(candidate, centerZ);
                     if (closedNeighbors.Count > 0)
                     {
                         MazeCell neighbor = closedNeighbors[Random.Range(0, closedNeighbors.Count)];
@@ -406,6 +428,46 @@ public class MazeGenerator : MonoBehaviour
                         cyclesAdded++;
                     }
                 }
+            }
+        }
+    }
+
+    private List<MazeCell> GetClosedAdjacentNeighborsSameHalf(MazeCell cell, int midZ)
+    {
+        List<MazeCell> closed = new List<MazeCell>(4);
+        int x = cell.GridX;
+        int z = cell.GridZ;
+        bool inSouthHalf = (z <= midZ);
+
+        if (z + 1 < mazeDepth && !cell.IsNorthOpen)
+        {
+            bool neighborInSameHalf = (z + 1 <= midZ) == inSouthHalf;
+            if (neighborInSameHalf) closed.Add(mazeGrid[x, z + 1]);
+        }
+        if (z - 1 >= 0 && !cell.IsSouthOpen)
+        {
+            bool neighborInSameHalf = (z - 1 <= midZ) == inSouthHalf;
+            if (neighborInSameHalf) closed.Add(mazeGrid[x, z - 1]);
+        }
+        if (x + 1 < mazeWidth && !cell.IsEastOpen) closed.Add(mazeGrid[x + 1, z]);
+        if (x - 1 >= 0 && !cell.IsWestOpen) closed.Add(mazeGrid[x - 1, z]);
+
+        return closed;
+    }
+
+    private void CacheNavigationConnectionsMask()
+    {
+        for (int x = 0; x < mazeWidth; x++)
+        {
+            for (int z = 0; z < mazeDepth; z++)
+            {
+                MazeCell c = mazeGrid[x, z];
+                byte mask = 0;
+                if (z + 1 < mazeDepth && c.IsNorthOpen) mask |= 1;
+                if (z - 1 >= 0 && c.IsSouthOpen)        mask |= 2;
+                if (x + 1 < mazeWidth && c.IsEastOpen)  mask |= 4;
+                if (x - 1 >= 0 && c.IsWestOpen)         mask |= 8;
+                navConnectionsMask[x, z] = mask;
             }
         }
     }
@@ -500,7 +562,7 @@ public class MazeGenerator : MonoBehaviour
         RemainingDeadEndsCount = deadEnds;
 
         Debug.Log($"[MazeGenerator] Laberinto {mazeWidth}x{mazeDepth} ({mazeWidth * cellSize}x{mazeDepth * cellSize}m) verificado: " +
-                  $"100% conexo | Ciclos activos: {TotalCyclesCount} | Callejones sin salida: {RemainingDeadEndsCount}");
+                  $"Paso obligatorio por Farola Central ({mazeWidth / 2},{mazeDepth / 2}) | Ciclos activos: {TotalCyclesCount} | Callejones: {RemainingDeadEndsCount}");
     }
 
     private int GetOpenPassageCount(MazeCell cell)
@@ -511,20 +573,6 @@ public class MazeGenerator : MonoBehaviour
         if (cell.GridX + 1 < mazeWidth && cell.IsEastOpen) count++;
         if (cell.GridX - 1 >= 0 && cell.IsWestOpen) count++;
         return count;
-    }
-
-    private List<MazeCell> GetClosedAdjacentNeighbors(MazeCell cell)
-    {
-        List<MazeCell> closed = new List<MazeCell>(4);
-        int x = cell.GridX;
-        int z = cell.GridZ;
-
-        if (z + 1 < mazeDepth && !cell.IsNorthOpen) closed.Add(mazeGrid[x, z + 1]);
-        if (z - 1 >= 0 && !cell.IsSouthOpen) closed.Add(mazeGrid[x, z - 1]);
-        if (x + 1 < mazeWidth && !cell.IsEastOpen) closed.Add(mazeGrid[x + 1, z]);
-        if (x - 1 >= 0 && !cell.IsWestOpen) closed.Add(mazeGrid[x - 1, z]);
-
-        return closed;
     }
 
     public bool HasCorridorLineOfSight(Vector3 fromWorldPos, Vector3 toWorldPos)
@@ -604,6 +652,38 @@ public class MazeGenerator : MonoBehaviour
             results.Add(pos);
         }
         return results;
+    }
+
+    public Vector3 GetTacticalPatrolPointNearPlayer(Vector3 enemyPos, float minDistFromPlayer, float maxDistFromPlayer)
+    {
+        if (playerTransform == null)
+        {
+            return new Vector3(Random.Range(1, mazeWidth - 1) * cellSize, 0f, Random.Range(1, mazeDepth - 1) * cellSize);
+        }
+
+        Vector3 pPos = playerTransform.position;
+        int px = Mathf.Clamp(Mathf.RoundToInt(pPos.x / cellSize), 0, mazeWidth - 1);
+        int pz = Mathf.Clamp(Mathf.RoundToInt(pPos.z / cellSize), 0, mazeDepth - 1);
+        int maxCellRadius = Mathf.CeilToInt(maxDistFromPlayer / cellSize);
+
+        for (int attempt = 0; attempt < 35; attempt++)
+        {
+            int rx = Mathf.Clamp(px + Random.Range(-maxCellRadius, maxCellRadius + 1), 0, mazeWidth - 1);
+            int rz = Mathf.Clamp(pz + Random.Range(-maxCellRadius, maxCellRadius + 1), 0, mazeDepth - 1);
+            Vector3 candidate = new Vector3(rx * cellSize, 0f, rz * cellSize);
+
+            if (IsPositionInSafeZone3D(candidate, 1.5f)) continue;
+
+            float dToPlayer = Vector3.Distance(candidate, pPos);
+            float dToEnemy = Vector3.Distance(candidate, enemyPos);
+
+            if (dToPlayer >= minDistFromPlayer && dToPlayer <= maxDistFromPlayer && dToEnemy >= cellSize * 2f)
+            {
+                return candidate;
+            }
+        }
+
+        return GetRandomPatrolPointInSector(Random.Range(0, 4), pPos, minDistFromPlayer);
     }
 
     public Vector3 GetRandomPatrolPointInSector(int sectorIndex, Vector3 avoidPos, float minAvoidDist)
@@ -725,28 +805,45 @@ public class MazeGenerator : MonoBehaviour
         GameObject waypointsParent = new GameObject("StrategicWaypointsAndSafeZone");
         waypointsParent.transform.SetParent(transform);
 
+        GameObject lampHolder = new GameObject("MidMaze_StreetLight_SafeZone");
+        lampHolder.transform.SetParent(waypointsParent.transform);
+        lampHolder.transform.position = SafeZoneCenter;
+
         if (streetLightPrefab != null)
         {
-            Vector3 lampOffset = new Vector3(cellSize * 0.18f, 0f, cellSize * 0.18f);
+            Vector3 lampOffset = new Vector3(cellSize * 0.16f, 0f, cellSize * 0.16f);
             GameObject streetLightObj = Instantiate(
                 streetLightPrefab,
                 SafeZoneCenter + lampOffset,
                 Quaternion.identity,
-                waypointsParent.transform
+                lampHolder.transform
             );
-            streetLightObj.name = "MidMaze_StreetLight_SafeZone";
-
-            GameObject safeLightObj = new GameObject("SafeZoneWarmLight");
-            safeLightObj.transform.SetParent(streetLightObj.transform);
-            safeLightObj.transform.localPosition = new Vector3(0f, 3.2f, 0f);
-
-            Light safeLight = safeLightObj.AddComponent<Light>();
-            safeLight.type = LightType.Point;
-            safeLight.color = streetLightColor;
-            safeLight.range = safeZoneRadius * 2.4f;
-            safeLight.intensity = streetLightIntensity;
-            safeLight.shadows = LightShadows.None; // Sin sombras pesadas para optimizar en baja gama
+            streetLightObj.name = "StreetLightModel";
         }
+
+        GameObject safePointLightObj = new GameObject("SafeZoneWarmPointLight");
+        safePointLightObj.transform.SetParent(lampHolder.transform);
+        safePointLightObj.transform.localPosition = new Vector3(0f, 3.4f, 0f);
+
+        Light safePointLight = safePointLightObj.AddComponent<Light>();
+        safePointLight.type = LightType.Point;
+        safePointLight.color = streetLightColor;
+        safePointLight.range = safeZoneRadius * 3.5f;
+        safePointLight.intensity = streetLightIntensity;
+        safePointLight.shadows = LightShadows.None;
+
+        GameObject safeSpotLightObj = new GameObject("SafeZoneDownSpotLight");
+        safeSpotLightObj.transform.SetParent(lampHolder.transform);
+        safeSpotLightObj.transform.localPosition = new Vector3(0f, 4.2f, 0f);
+        safeSpotLightObj.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+
+        Light safeSpotLight = safeSpotLightObj.AddComponent<Light>();
+        safeSpotLight.type = LightType.Spot;
+        safeSpotLight.color = streetLightColor;
+        safeSpotLight.range = 10f;
+        safeSpotLight.spotAngle = 105f;
+        safeSpotLight.intensity = streetLightIntensity * 1.4f;
+        safeSpotLight.shadows = LightShadows.None;
 
         if (escapePathCells.Count < 4) return;
         int pathCount = escapePathCells.Count;
@@ -776,7 +873,7 @@ public class MazeGenerator : MonoBehaviour
 
                 Quaternion signRot = Quaternion.LookRotation(dirToNext) * Quaternion.Euler(0f, signPostRotationOffset, 0f);
                 GameObject signObj = Instantiate(signPostPrefab, signPos, signRot, waypointsParent.transform);
-                signObj.name = $"SignPost_Quarter_{q + 1}";
+                signObj.name = $"SignPost_Guide_{q + 1}";
 
                 GameObject signLightObj = new GameObject("SignWarmGlow");
                 signLightObj.transform.SetParent(signObj.transform);
@@ -872,7 +969,9 @@ public class MazeGenerator : MonoBehaviour
     private void TriggerVictory()
     {
         hasWon = true;
+        win = true;
 
+        // 1. Eliminamos a todos los enemigos activos
         GoblinSpawner spawner = GetComponent<GoblinSpawner>();
         if (spawner != null)
         {
@@ -880,18 +979,30 @@ public class MazeGenerator : MonoBehaviour
             spawner.enabled = false;
         }
 
-        FirstPersonWalker walker = playerTransform.GetComponent<FirstPersonWalker>();
-        if (walker != null) walker.enabled = false;
+        // 2. Desactivamos el movimiento, el lanzador de rocas y el indicador del jugador
+        if (playerTransform != null)
+        {
+            FirstPersonWalker walker = playerTransform.GetComponent<FirstPersonWalker>();
+            if (walker != null) walker.enabled = false;
 
-        ParabolicRockThrower thrower = playerTransform.GetComponent<ParabolicRockThrower>();
-        if (thrower != null) thrower.enabled = false;
+            ParabolicRockThrower thrower = playerTransform.GetComponent<ParabolicRockThrower>();
+            if (thrower != null) thrower.enabled = false;
 
-        EnemyProximityArcIndicator arcIndicator = playerTransform.GetComponent<EnemyProximityArcIndicator>();
-        if (arcIndicator != null) arcIndicator.enabled = false;
+            EnemyProximityArcIndicator arcIndicator = playerTransform.GetComponent<EnemyProximityArcIndicator>();
+            if (arcIndicator != null) arcIndicator.enabled = false;
+        }
 
+        // 3. Detenemos explícitamente el generador de viento
+        foreach (HowlingWindAudio wind in FindObjectsOfType<HowlingWindAudio>(true))
+        {
+            wind.StopWind();
+        }
+
+        // 4. Liberamos el cursor del ratón
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
 
+        // 5. Activamos tu Panel de Victoria del Canvas y silenciamos todos los demás AudioSources de la escena
         if (victoryCanvasPanel != null)
         {
             if (victoryCanvasPanel.transform.root != null)
@@ -900,12 +1011,41 @@ public class MazeGenerator : MonoBehaviour
             }
             victoryCanvasPanel.SetActive(true);
             whiteScreenAlpha = 0f;
+
+            // Apagamos todos los AudioSources del juego EXCEPTO los que estén dentro de tu victoryCanvasPanel
+            SilenceAllAudioExceptVictoryPanel();
             return;
         }
 
         if (!string.IsNullOrEmpty(victorySceneName))
         {
             SceneManager.LoadScene(victorySceneName);
+        }
+    }
+
+    private void SilenceAllAudioExceptVictoryPanel()
+    {
+        AudioSource[] allAudioSources = FindObjectsOfType<AudioSource>(true);
+        foreach (AudioSource source in allAudioSources)
+        {
+            if (source == null) continue;
+
+            bool belongsToVictoryPanel = (victoryCanvasPanel != null) &&
+                                         (source.gameObject == victoryCanvasPanel || source.transform.IsChildOf(victoryCanvasPanel.transform));
+
+            if (belongsToVictoryPanel)
+            {
+                source.enabled = true;
+                if (!source.isPlaying && source.clip != null)
+                {
+                    source.Play();
+                }
+            }
+            else
+            {
+                source.Stop();
+                source.enabled = false;
+            }
         }
     }
 
@@ -1038,26 +1178,6 @@ public class MazeGenerator : MonoBehaviour
         debugPathRenderer.receiveShadows = false;
         debugPathRenderer.enabled = false;
         showEscapePathInGame = false;
-    }
-
-    private MazeCell GetRandomUnvisitedNeighbor(MazeCell cell)
-    {
-        List<MazeCell> unvisitedNeighbors = new List<MazeCell>();
-        int x = cell.GridX;
-        int z = cell.GridZ;
-
-        if (z + 1 < mazeDepth && !mazeGrid[x, z + 1].IsVisited)
-            unvisitedNeighbors.Add(mazeGrid[x, z + 1]);
-        if (z - 1 >= 0 && !mazeGrid[x, z - 1].IsVisited)
-            unvisitedNeighbors.Add(mazeGrid[x, z - 1]);
-        if (x + 1 < mazeWidth && !mazeGrid[x + 1, z].IsVisited)
-            unvisitedNeighbors.Add(mazeGrid[x + 1, z]);
-        if (x - 1 >= 0 && !mazeGrid[x - 1, z].IsVisited)
-            unvisitedNeighbors.Add(mazeGrid[x - 1, z]);
-
-        if (unvisitedNeighbors.Count == 0) return null;
-
-        return unvisitedNeighbors[Random.Range(0, unvisitedNeighbors.Count)];
     }
 
     private void RemoveWallBetween(MazeCell current, MazeCell next)

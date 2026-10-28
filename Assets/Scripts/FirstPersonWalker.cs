@@ -83,7 +83,15 @@ public class FirstPersonWalker : MonoBehaviour
     }
 
     private void Update()
-    {
+    {   
+        if (PauseManager.IsGamePaused)
+        return;
+
+        if (Cursor.lockState != CursorLockMode.Locked)
+        {
+            Cursor.lockState = CursorLockMode.Locked;
+            Cursor.visible = false;
+        }
         // 1. Rotación de la vista con el ratón
         float mouseX = Input.GetAxis("Mouse X") * mouseSensitivity;
         float mouseY = Input.GetAxis("Mouse Y") * mouseSensitivity;
@@ -193,6 +201,15 @@ public class FirstPersonWalker : MonoBehaviour
         else
         {
             exhaustedTimer = exhaustedCooldownTime;
+        }
+    }
+
+    private void OnApplicationFocus(bool hasFocus)
+    {
+        if (hasFocus && !PauseManager.IsGamePaused)
+        {
+            Cursor.lockState = CursorLockMode.Locked;
+            Cursor.visible = false;
         }
     }
 }

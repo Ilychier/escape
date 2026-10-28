@@ -10,22 +10,23 @@ public class GoblinSpawner : MonoBehaviour
     [Header("Referencias")]
     [SerializeField] private Transform playerTransform;
 
-    [Header("Distribución de Patrullas en el Laberinto (120x120m)")]
+    [Header("Distribución de Patrullas Cercanas")]
     [Tooltip("Segundos de gracia al inicio de la partida antes de desplegar el primer enemigo")]
-    [SerializeField] private float initialSpawnDelay = 10f;
-    [Tooltip("Cantidad total de enemigos patrullando los 4 cuadrantes del laberinto (4 = 1 por cuadrante)")]
-    [SerializeField] private int maxActiveGoblins = 4;
-    [Tooltip("Intervalo en segundos entre la aparición de cada enemigo hasta completar el cupo")]
-    [SerializeField] private float spawnInterval = 6f;
-    [Tooltip("Distancia mínima respecto al jugador al aparecer inicialmente")]
-    [SerializeField] private float minSpawnDistanceFromPlayer = 18f;
+    [SerializeField] private float initialSpawnDelay = 6f;
+    [Tooltip("Cantidad total de enemigos activos patrullando tu zona")]
+    [SerializeField] private int maxActiveGoblins = 5;
+    [Tooltip("Intervalo en segundos entre la aparición de cada enemigo")]
+    [SerializeField] private float spawnInterval = 4f;
+    [Tooltip("Distancia mínima respecto al jugador al aparecer")]
+    [SerializeField] private float minSpawnDistanceFromPlayer = 12f;
+    [Tooltip("Distancia máxima respecto al jugador al aparecer o reubicarse")]
+    [SerializeField] private float maxSpawnDistanceFromPlayer = 22f;
+    [Tooltip("Si un enemigo en patrulla se queda atrás a más de esta distancia, pasa a patrullar una intersección más cercana")]
+    [SerializeField] private float maxPatrolLeashDistance = 32f;
 
     [Header("Parámetros de IA y Búsqueda")]
-    [Tooltip("Velocidad del enemigo cuando te persigue con línea de visión directa")]
-    [SerializeField] private float goblinChaseSpeed = 2.85f;
-    [Tooltip("Duración del aturdimiento al golpearlo con una roca")]
+    [SerializeField] private float goblinChaseSpeed = 2.9f;
     [SerializeField] private float goblinStunDuration = 4.5f;
-    [Tooltip("Segundos que el enemigo investiga los pasillos cercanos tras perderte de vista en una esquina")]
     [SerializeField] private float searchDurationAfterLosingSight = 7.5f;
     [SerializeField] private float goblinScale = 0.85f;
     [Range(0.05f, 1f)]
@@ -65,7 +66,6 @@ public class GoblinSpawner : MonoBehaviour
 
     private void Update()
     {
-        // Truco de desarrollo con la tecla F2
         if (allowDebugCheatF2 && Input.GetKeyDown(KeyCode.F2))
         {
             spawningDisabledByCheat = !spawningDisabledByCheat;
@@ -86,26 +86,45 @@ public class GoblinSpawner : MonoBehaviour
             spawnTimer -= Time.deltaTime;
             if (spawnTimer <= 0f)
             {
-                SpawnPatrolGoblinInSector(activeGoblins.Count);
+                SpawnPatrolGoblinNearPlayer(activeGoblins.Count);
                 spawnTimer = spawnInterval;
+            }
+        }
+
+        // Si un enemigo en modo Patrol se quedó olvidado en la otra punta del laberinto (>32m), lo reubicamos fuera de vista en un pasillo a 14-22m
+        for (int i = 0; i < activeGoblins.Count; i++)
+        {
+            GoblinEnemy goblin = activeGoblins[i];
+            if (goblin == null || goblin.IsStunned || goblin.CurrentState == GoblinEnemy.AIState.Chase) continue;
+
+            float dist = Vector3.Distance(playerTransform.position, goblin.transform.position);
+            if (dist > maxPatrolLeashDistance)
+            {
+                Vector3 newPatrolStart = MazeGenerator.Instance.GetTacticalPatrolPointNearPlayer(
+                    playerTransform.position,
+                    minSpawnDistanceFromPlayer,
+                    maxSpawnDistanceFromPlayer
+                );
+                goblin.transform.position = newPatrolStart;
+                goblin.EnterPatrolState();
             }
         }
     }
 
-    private void SpawnPatrolGoblinInSector(int enemyIndex)
+    private void SpawnPatrolGoblinNearPlayer(int enemyIndex)
     {
         int assignedSector = enemyIndex % 4;
-        Vector3 spawnPos = MazeGenerator.Instance.GetRandomPatrolPointInSector(
-            assignedSector,
+        Vector3 spawnPos = MazeGenerator.Instance.GetTacticalPatrolPointNearPlayer(
             playerTransform.position,
-            minSpawnDistanceFromPlayer
+            minSpawnDistanceFromPlayer,
+            maxSpawnDistanceFromPlayer
         );
 
         GameObject chosenPrefab = goblinPrefabs[Random.Range(0, goblinPrefabs.Length)];
         if (chosenPrefab == null) return;
 
         GameObject goblinObj = Instantiate(chosenPrefab, spawnPos, Quaternion.identity, transform);
-        goblinObj.name = $"Enemy_Sector_{assignedSector + 1}";
+        goblinObj.name = $"Enemy_Hunter_{enemyIndex + 1}";
         goblinObj.transform.localScale = Vector3.one * goblinScale;
 
         GoblinEnemy enemyScript = goblinObj.GetComponent<GoblinEnemy>();

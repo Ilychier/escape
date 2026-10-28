@@ -70,7 +70,14 @@ public class ParabolicRockThrower : MonoBehaviour
     private bool isAiming = false;
 
     private void Update()
-    {
+    {   
+        if (PauseManager.IsGamePaused)
+        {
+            SetTrajectoryVisible(false);
+            isAiming = false;
+            return;
+        }
+
         if (Time.timeSinceLevelLoad < 0.3f)
         {
             SetTrajectoryVisible(false);
@@ -301,6 +308,9 @@ public class ParabolicRockThrower : MonoBehaviour
 
     private void OnGUI()
     {
+        if (PauseManager.IsGamePaused) 
+            return;
+
         float remaining = nextAllowedThrowTime - Time.time;
 
         // Si ya no está en cooldown, no dibujamos absolutamente nada en pantalla

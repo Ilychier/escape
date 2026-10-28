@@ -18,6 +18,7 @@ public class HowlingWindAudio : MonoBehaviour
 
     private AudioSource audioSource;
     private bool useProceduralWind;
+    private volatile bool stoppedForVictory = false;
 
     // Variables del sintetizador procedural de viento (hilo de audio)
     private System.Random audioRng = new System.Random();
@@ -30,11 +31,17 @@ public class HowlingWindAudio : MonoBehaviour
 
     private void Awake()
     {
+        // Al cargar o reiniciar la escena, restauramos siempre el estado activo del viento
+        stoppedForVictory = false;
+        MazeGenerator.win = false;
+
         sampleRate = AudioSettings.outputSampleRate;
         audioSource = GetComponent<AudioSource>();
+        audioSource.enabled = true;
         audioSource.loop = true;
         audioSource.playOnAwake = true;
-        audioSource.spatialBlend = 0f; // 2D envolvente en toda la escena
+        audioSource.spatialBlend = 0f;
+        audioSource.volume = baseVolume;
 
         if (customWindClip != null)
         {
@@ -45,7 +52,6 @@ public class HowlingWindAudio : MonoBehaviour
         else
         {
             useProceduralWind = true;
-            // En Unity 2021+/6, un AudioSource necesita estar en Play() para activar OnAudioFilterRead
             AudioClip dummyClip = AudioClip.Create("SilentCarrier", sampleRate, 1, sampleRate, false);
             audioSource.clip = dummyClip;
             audioSource.Play();
@@ -53,8 +59,21 @@ public class HowlingWindAudio : MonoBehaviour
     }
 
     private void Update()
-    {
-        // Calculamos ráfagas irregulares con Perlin Noise
+    {   
+        if (PauseManager.IsGamePaused)
+            return;
+
+        bool hasWonNow = (MazeGenerator.Instance != null && MazeGenerator.Instance.HasWon) || MazeGenerator.win;
+
+        if (stoppedForVictory || hasWonNow)
+        {
+            if (!stoppedForVictory)
+            {
+                StopWind();
+            }
+            return;
+        }
+
         float noise = Mathf.PerlinNoise(Time.time * gustSpeed, 10.5f);
         currentGustFactor = noise;
 
@@ -71,32 +90,39 @@ public class HowlingWindAudio : MonoBehaviour
 
     private void OnAudioFilterRead(float[] data, int channels)
     {
-        if (!useProceduralWind) return;
+        if (!useProceduralWind || stoppedForVictory || PauseManager.IsGamePaused)
+        {
+            System.Array.Clear(data, 0, data.Length);
+            return;
+        }
 
         for (int i = 0; i < data.Length; i += channels)
         {
-            // Ruido blanco base
             float whiteNoise = (float)(audioRng.NextDouble() * 2.0 - 1.0);
 
-            // Dos ondas lentas para modular el silbido helado del viento
             dspPhase1 += 0.22 / sampleRate;
             dspPhase2 += 0.09 / sampleRate;
+
             if (dspPhase1 > 1.0) dspPhase1 -= 1.0;
             if (dspPhase2 > 1.0) dspPhase2 -= 1.0;
 
             float wave1 = Mathf.Sin((float)(dspPhase1 * 2.0 * Mathf.PI));
             float wave2 = Mathf.Sin((float)(dspPhase2 * 2.0 * Mathf.PI));
+
             float modulation = (wave1 * 0.6f + wave2 * 0.4f) * 0.5f + 0.5f;
 
-            // Filtro de estado variable (State Variable Filter) para crear el aullido resonante
-            float cutoffFrequency = Mathf.Lerp(0.015f, 0.055f, (modulation + currentGustFactor) * 0.5f);
-            float resonance = 0.08f; // Cuanto más bajo, más silba el viento
+            float cutoffFrequency = Mathf.Lerp(
+                0.015f,
+                0.055f,
+                (modulation + currentGustFactor) * 0.5f
+            );
+
+            float resonance = 0.08f;
 
             filterLow += cutoffFrequency * filterBand;
             float filterHigh = whiteNoise - filterLow - (resonance * filterBand);
             filterBand += cutoffFrequency * filterHigh;
 
-            // Mezclamos el cuerpo grave del viento (filterLow) con el aullido agudo (filterBand)
             float windSample = (filterLow * 0.25f) + (filterBand * 0.85f);
             windSample = Mathf.Clamp(windSample * 0.35f, -1f, 1f);
 
@@ -104,6 +130,17 @@ public class HowlingWindAudio : MonoBehaviour
             {
                 data[i + c] = windSample;
             }
+        }
+    }
+
+    public void StopWind()
+    {
+        stoppedForVictory = true;
+
+        if (audioSource != null)
+        {
+            audioSource.Stop();
+            audioSource.enabled = false;
         }
     }
 }
