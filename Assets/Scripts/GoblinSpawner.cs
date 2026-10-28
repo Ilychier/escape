@@ -10,19 +10,19 @@ public class GoblinSpawner : MonoBehaviour
     [Header("Referencias")]
     [SerializeField] private Transform playerTransform;
 
-    [Header("Distribución de Patrullas Cercanas")]
+    [Header("Distribución de Patrullas Cercanas (4 Roles Pac-Man)")]
     [Tooltip("Segundos de gracia al inicio de la partida antes de desplegar el primer enemigo")]
     [SerializeField] private float initialSpawnDelay = 1.5f;
-    [Tooltip("Cantidad total de enemigos activos patrullando tu zona")]
-    [SerializeField] private int maxActiveGoblins = 5;
+    [Tooltip("4 enemigos activos (0: Emboscador, 1: Acechador, 2: Centinela, 3: Merodeador Acústico)")]
+    [SerializeField] private int maxActiveGoblins = 4;
     [Tooltip("Intervalo en segundos entre la aparición de cada enemigo")]
     [SerializeField] private float spawnInterval = 2.0f;
     [Tooltip("Distancia mínima respecto al jugador al aparecer")]
     [SerializeField] private float minSpawnDistanceFromPlayer = 10f;
     [Tooltip("Distancia máxima respecto al jugador al aparecer o reubicarse")]
     [SerializeField] private float maxSpawnDistanceFromPlayer = 18f;
-    [Tooltip("Si un enemigo en patrulla se queda atrás a más de esta distancia, pasa a patrullar una intersección más cercana")]
-    [SerializeField] private float maxPatrolLeashDistance = 24f;
+    [Tooltip("Si un enemigo se queda atrás a más de esta distancia, se reubica adelante fuera de vista")]
+    [SerializeField] private float maxPatrolLeashDistance = 22f;
 
     [Header("Parámetros de IA y Búsqueda")]
     [SerializeField] private float goblinChaseSpeed = 2.9f;
@@ -67,7 +67,7 @@ public class GoblinSpawner : MonoBehaviour
     }
 
     private void Update()
-    {   
+    {
         // Si el jugador murió, desactivar el spawner por completo
         if (GoblinEnemy.IsPlayerDying)
         {
@@ -101,7 +101,7 @@ public class GoblinSpawner : MonoBehaviour
             }
         }
 
-        // Si un enemigo en modo Patrol se quedó olvidado en la otra punta del laberinto (>32m), lo reubicamos fuera de vista en un pasillo a 14-22m
+        // Correa inteligente: si el jugador sale corriendo y deja atrás a un enemigo, lo reubicamos por delante (fuera de vista)
         for (int i = 0; i < activeGoblins.Count; i++)
         {
             GoblinEnemy goblin = activeGoblins[i];
@@ -110,11 +110,11 @@ public class GoblinSpawner : MonoBehaviour
             float dist = Vector3.Distance(playerTransform.position, goblin.transform.position);
             if (dist > maxPatrolLeashDistance)
             {
-                Vector3 newPatrolStart = MazeGenerator.Instance.GetTacticalPatrolPointNearPlayer(
-                    playerTransform.position,
-                    minSpawnDistanceFromPlayer,
-                    maxSpawnDistanceFromPlayer
-                );
+                // Nunca teletransportar si el jugador lo está viendo en el mismo pasillo
+                if (MazeGenerator.Instance.HasCorridorLineOfSight(goblin.transform.position, playerTransform.position))
+                    continue;
+
+                Vector3 newPatrolStart = GetStrategicRepositionPoint(goblin.AssignedRoleIndex);
                 goblin.transform.position = newPatrolStart;
                 goblin.EnterPatrolState();
             }
@@ -123,18 +123,15 @@ public class GoblinSpawner : MonoBehaviour
 
     private void SpawnPatrolGoblinNearPlayer(int enemyIndex)
     {
-        int assignedSector = enemyIndex % 4;
-        Vector3 spawnPos = MazeGenerator.Instance.GetTacticalPatrolPointNearPlayer(
-            playerTransform.position,
-            minSpawnDistanceFromPlayer,
-            maxSpawnDistanceFromPlayer
-        );
+        int assignedRole = enemyIndex % 4;
+        Vector3 spawnPos = GetStrategicRepositionPoint(assignedRole);
 
         GameObject chosenPrefab = goblinPrefabs[Random.Range(0, goblinPrefabs.Length)];
         if (chosenPrefab == null) return;
 
         GameObject goblinObj = Instantiate(chosenPrefab, spawnPos, Quaternion.identity, transform);
-        goblinObj.name = $"Enemy_Hunter_{enemyIndex + 1}";
+        string[] roleNames = { "Ambusher", "Stalker", "Sentinel", "Acoustic" };
+        goblinObj.name = $"Enemy_{roleNames[assignedRole]}_{enemyIndex + 1}";
         goblinObj.transform.localScale = Vector3.one * goblinScale;
 
         GoblinEnemy enemyScript = goblinObj.GetComponent<GoblinEnemy>();
@@ -152,7 +149,7 @@ public class GoblinSpawner : MonoBehaviour
             goblinAmbientVolume,
             goblinCatchMp3,
             goblinCatchVolume,
-            assignedSector,
+            assignedRole,
             jumpscareCameraHeight,
             jumpscareDistance,
             jumpscareDuration,
@@ -161,6 +158,65 @@ public class GoblinSpawner : MonoBehaviour
         );
 
         activeGoblins.Add(enemyScript);
+    }
+
+    private Vector3 GetStrategicRepositionPoint(int roleIndex)
+    {
+        Vector3 pPos = playerTransform.position;
+        Vector3 pForward = playerTransform.forward;
+        pForward.y = 0f;
+        if (pForward.sqrMagnitude < 0.001f) pForward = Vector3.forward;
+        pForward.Normalize();
+
+        Vector3 bestPoint = MazeGenerator.Instance.GetTacticalPatrolPointNearPlayer(
+            pPos,
+            minSpawnDistanceFromPlayer,
+            maxSpawnDistanceFromPlayer
+        );
+        float bestScore = -9999f;
+
+        for (int attempt = 0; attempt < 8; attempt++)
+        {
+            Vector3 candidate = MazeGenerator.Instance.GetTacticalPatrolPointNearPlayer(
+                pPos,
+                minSpawnDistanceFromPlayer,
+                maxSpawnDistanceFromPlayer
+            );
+
+            // Evitar aparecer en línea de visión directa del jugador
+            bool hasLOS = MazeGenerator.Instance.HasCorridorLineOfSight(candidate, pPos);
+            float losPenalty = hasLOS ? 5.0f : 0f;
+
+            Vector3 dirFromPlayer = (candidate - pPos);
+            dirFromPlayer.y = 0f;
+            if (dirFromPlayer.sqrMagnitude > 0.01f) dirFromPlayer.Normalize();
+
+            float forwardDot = Vector3.Dot(pForward, dirFromPlayer);
+
+            // Priorizar que aparezcan hacia adelante o en los flancos hacia donde corre el jugador
+            float roleAlignment = (roleIndex == 0 || roleIndex == 2) ? forwardDot * 1.8f : forwardDot * 0.8f;
+
+            // Separación respecto a otros enemigos activos para no amontonarlos en el mismo pasillo
+            float crowdingPenalty = 0f;
+            for (int i = 0; i < activeGoblins.Count; i++)
+            {
+                if (activeGoblins[i] == null) continue;
+                float dToOther = Vector3.Distance(candidate, activeGoblins[i].transform.position);
+                if (dToOther < 8f)
+                {
+                    crowdingPenalty += (8f - dToOther) * 0.6f;
+                }
+            }
+
+            float score = roleAlignment - losPenalty - crowdingPenalty;
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestPoint = candidate;
+            }
+        }
+
+        return bestPoint;
     }
 
     public void ClearAllActiveGoblins()

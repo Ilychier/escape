@@ -9,11 +9,19 @@ public class GoblinEnemy : MonoBehaviour
 
     public enum AIState
     {
-        Patrol,               // Patrulla por los pasillos cercanos a la zona activa sin conocer la celda exacta del jugador
+        Patrol,               // Patrulla táctica según su arquetipo (Emboscador, Acechador, Centinela, Acústico)
         Chase,                // Persecución activa mientras tiene línea de visión o escucha cercana
-        InvestigateLastKnown, // Va hasta la última posición donde vio o escuchó al jugador
+        InvestigateLastKnown, // Va hasta la última posición donde vio o escuchó al jugador o una roca
         SearchNearbyRoutes,   // Explora los pasillos y bifurcaciones adyacentes antes de volver a patrullar
         Stunned               // Aturdido temporalmente por el impacto de una roca
+    }
+
+    public enum HunterArchetype
+    {
+        Ambusher = 0,         // Pinky: Busca intersecciones por delante del jugador
+        Stalker = 1,          // Blinky: Presiona de cerca y recorta distancia rápido
+        RouteSentinel = 2,    // Inky: Corta flancos y pasillos diagonales a media distancia
+        AcousticProwler = 3   // Clyde: Patrulla abierto pero tiene un oído mucho más agudo
     }
 
     [Header("Velocidades por Estado")]
@@ -21,6 +29,8 @@ public class GoblinEnemy : MonoBehaviour
     [SerializeField] private float investigateSpeed = 2.5f;
     [SerializeField] private float searchSpeed = 2.25f;
     [SerializeField] private float chaseSpeed = 2.9f;
+    [Tooltip("Multiplicador de velocidad cuando el enemigo está lejos y fuera de vista para que no lo dejes atrás corriendo")]
+    [SerializeField] private float offScreenCatchUpMultiplier = 1.35f;
 
     [Header("Percepción (Línea de Visión y Oído)")]
     [SerializeField] private float visionRange = 17.0f;
@@ -28,15 +38,25 @@ public class GoblinEnemy : MonoBehaviour
     [SerializeField] private float visionAngle = 120f;
     [SerializeField] private float hearingRangeRunning = 10.0f;
     [SerializeField] private float closeProximitySenseRange = 3.2f;
-    [SerializeField] private float loseSightGraceTime = 0.6f;
+    [SerializeField] private float loseSightGraceTime = 1.5f;
+
+    [Header("Equilibrio Anti-Encierro (AI Director)")]
+    [Tooltip("Máximo de enemigos que pueden perseguir a matar simultáneamente (evita encierros imposibles de 3 o 4)")]
+    [SerializeField] private int maxSimultaneousChasers = 2;
+    [Tooltip("Distancia mínima que mantienen los enemigos adicionales cuando el cupo de persecución está lleno")]
+    [SerializeField] private float flankContainmentDistance = 6.5f;
 
     [Header("Búsqueda e Investigación")]
     [SerializeField] private float searchDuration = 7.5f;
     [SerializeField] private float pathUpdateInterval = 0.2f;
 
-    [Header("Captura y Aturdimiento")]
+    [Header("Captura, Aturdimiento y Mejoras UX de Roca")]
     [SerializeField] private float killDistance = 1.15f;
     [SerializeField] private float stunDuration = 4.5f;
+    [Tooltip("Metros que el enemigo retrocede al recibir un golpe de roca")]
+    [SerializeField] private float stunKnockbackDistance = 1.25f;
+    [Tooltip("Radio en el que un segundo enemigo pegado al primero también queda aturdido por el impacto")]
+    [SerializeField] private float splashStunRadius = 2.8f;
 
     [Header("Apariencia Oscura del Enemigo")]
     [Range(0.05f, 1f)]
@@ -58,6 +78,7 @@ public class GoblinEnemy : MonoBehaviour
 
     private AIState currentState = AIState.Patrol;
     private int homeSectorIndex = 0;
+    private HunterArchetype archetype = HunterArchetype.Ambusher;
 
     private Vector3 lastKnownPlayerPosition;
     private Vector3 lastSeenPlayerMoveDir;
@@ -71,21 +92,50 @@ public class GoblinEnemy : MonoBehaviour
     private Queue<Vector3> searchBranchQueue = new Queue<Vector3>();
 
     private float stunTimer = 0f;
+    private float postStunGraceTimer = 0f;
     private float walkAnimPhase = 0f;
-    private static bool isPlayerDying = false;
-    public static bool IsPlayerDying => isPlayerDying;
 
+    private static bool isPlayerDying = false;
+    private static float slipThroughProtectionTimer = 0f;
+
+    public static bool IsPlayerDying => isPlayerDying;
     public AIState CurrentState => currentState;
     public bool IsStunned => currentState == AIState.Stunned;
+    public int AssignedRoleIndex => homeSectorIndex;
 
     private void Awake()
     {
         isPlayerDying = false;
+        slipThroughProtectionTimer = 0f;
     }
 
     public static void ResetDeathState()
     {
         isPlayerDying = false;
+        slipThroughProtectionTimer = 0f;
+    }
+
+    /// <summary>
+    /// Llama a este método desde tu script de la roca cuando impacte contra el suelo o una pared
+    /// para atraer a los enemigos cercanos a investigar el ruido.
+    /// </summary>
+    public static void NotifyNoiseAtPosition(Vector3 noiseWorldPos, float baseNoiseRadius = 15f)
+    {
+        for (int i = 0; i < AllActiveEnemies.Count; i++)
+        {
+            GoblinEnemy enemy = AllActiveEnemies[i];
+            if (enemy == null || enemy.IsStunned || enemy.currentState == AIState.Chase) continue;
+
+            float effectiveRadius = (enemy.archetype == HunterArchetype.AcousticProwler)
+                ? baseNoiseRadius * 1.4f
+                : baseNoiseRadius;
+
+            float dist = Vector3.Distance(enemy.transform.position, noiseWorldPos);
+            if (dist <= effectiveRadius)
+            {
+                enemy.HearExternalNoise(noiseWorldPos);
+            }
+        }
     }
 
     private void OnEnable()
@@ -118,15 +168,40 @@ public class GoblinEnemy : MonoBehaviour
         float customBrightness = 0.25f)
     {
         player = playerTarget;
+        homeSectorIndex = Mathf.Abs(assignedSector) % 4;
+        archetype = (HunterArchetype)homeSectorIndex;
+
         chaseSpeed = baseChaseSpeed;
-        patrolSpeed = baseChaseSpeed * 0.74f;
-        investigateSpeed = baseChaseSpeed * 0.88f;
-        searchSpeed = baseChaseSpeed * 0.78f;
+        patrolSpeed = baseChaseSpeed * 0.76f;
+        investigateSpeed = baseChaseSpeed * 0.90f;
+        searchSpeed = baseChaseSpeed * 0.80f;
         stunDuration = stunTime;
+
+        // Ajustes de personalidad según el arquetipo estilo Pac-Man
+        switch (archetype)
+        {
+            case HunterArchetype.Ambusher: // Pinky: rápido posicionándose en patrulla para emboscar adelante
+                patrolSpeed = baseChaseSpeed * 0.82f;
+                break;
+
+            case HunterArchetype.Stalker: // Blinky: persecución constante y tenaz
+                chaseSpeed = baseChaseSpeed * 1.02f;
+                loseSightGraceTime = 1.8f;
+                break;
+
+            case HunterArchetype.RouteSentinel: // Inky: equilibra visión amplia en cruces
+                visionAngle = 135f;
+                break;
+
+            case HunterArchetype.AcousticProwler: // Clyde: menos visión frontal, pero escucha correr desde muy lejos
+                visionAngle = 90f;
+                hearingRangeRunning = 15.5f;
+                patrolSpeed = baseChaseSpeed * 0.72f;
+                break;
+        }
 
         catchClip = onCatchMp3;
         catchVolume = onCatchVol;
-        homeSectorIndex = assignedSector;
 
         jumpscareCameraHeight = customJumpscareHeight;
         jumpscareDistance = customJumpscareDistance;
@@ -171,6 +246,10 @@ public class GoblinEnemy : MonoBehaviour
             monsterAmbientSource.minDistance = 1.2f;
             monsterAmbientSource.maxDistance = hearingRadius;
             monsterAmbientSource.volume = ambientVol;
+
+            // Tono sutilmente distinto por arquetipo para que el oído del jugador los diferencie
+            float[] rolePitches = { 1.12f, 0.86f, 1.0f, 1.22f };
+            monsterAmbientSource.pitch = rolePitches[homeSectorIndex];
             monsterAmbientSource.Play();
         }
 
@@ -180,9 +259,19 @@ public class GoblinEnemy : MonoBehaviour
     private void Update()
     {
         if (PauseManager.IsGamePaused)
-        return;
+            return;
 
         if (player == null || isPlayerDying) return;
+
+        if (slipThroughProtectionTimer > 0f)
+        {
+            slipThroughProtectionTimer -= Time.deltaTime;
+        }
+
+        if (postStunGraceTimer > 0f)
+        {
+            postStunGraceTimer -= Time.deltaTime;
+        }
 
         Vector3 playerFrameDelta = player.position - previousPlayerPos;
         playerFrameDelta.y = 0f;
@@ -190,12 +279,23 @@ public class GoblinEnemy : MonoBehaviour
         Vector3 playerMoveDir = playerFrameDelta.sqrMagnitude > 0.0001f ? playerFrameDelta.normalized : player.forward;
         previousPlayerPos = player.position;
 
+        float dist3DToPlayer = Vector3.Distance(
+            new Vector3(transform.position.x, player.position.y, transform.position.z),
+            player.position
+        );
+
         if (currentState == AIState.Stunned)
         {
             stunTimer -= Time.deltaTime;
             float wobbleX = Mathf.Sin(Time.time * 8f) * 12f - 25f;
             float wobbleZ = Mathf.Cos(Time.time * 8f) * 12f;
             transform.localRotation = Quaternion.Euler(wobbleX, transform.eulerAngles.y, wobbleZ);
+
+            // Si el jugador está atravesando al enemigo aturdido en un pasillo estrecho, darle protección breve
+            if (dist3DToPlayer <= 1.65f)
+            {
+                slipThroughProtectionTimer = Mathf.Max(slipThroughProtectionTimer, 0.45f);
+            }
 
             if (stunTimer <= 0f)
             {
@@ -211,12 +311,7 @@ public class GoblinEnemy : MonoBehaviour
             monsterAmbientSource.mute = playerProtectedInSafeZone;
         }
 
-        float dist3DToPlayer = Vector3.Distance(
-            new Vector3(transform.position.x, player.position.y, transform.position.z),
-            player.position
-        );
-
-        if (!playerProtectedInSafeZone && !isPlayerDying && dist3DToPlayer <= killDistance)
+        if (!playerProtectedInSafeZone && !isPlayerDying && postStunGraceTimer <= 0f && slipThroughProtectionTimer <= 0f && dist3DToPlayer <= killDistance)
         {
             if (MazeGenerator.Instance == null || MazeGenerator.Instance.HasCorridorLineOfSight(transform.position, player.position))
             {
@@ -234,9 +329,17 @@ public class GoblinEnemy : MonoBehaviour
             lastSeenPlayerMoveDir = playerMoveDir;
             timeSinceLastSawPlayer = 0f;
 
+            // AI Director: permitir Chase solo si no superamos el cupo de atacantes simultáneos (o si ya está muy cerca)
             if (currentState != AIState.Chase)
             {
-                EnterChaseState();
+                if (CanJoinActiveChase(dist3DToPlayer))
+                {
+                    EnterChaseState();
+                }
+                else if (currentState == AIState.Patrol)
+                {
+                    EnterInvestigateLastKnownState();
+                }
             }
         }
         else
@@ -247,21 +350,83 @@ public class GoblinEnemy : MonoBehaviour
         switch (currentState)
         {
             case AIState.Chase:
-                UpdateChaseState(playerProtectedInSafeZone);
+                UpdateChaseState(playerProtectedInSafeZone, dist3DToPlayer);
                 break;
 
             case AIState.InvestigateLastKnown:
-                UpdateInvestigateState();
+                UpdateInvestigateState(playerCurrentSpeed, dist3DToPlayer);
                 break;
 
             case AIState.SearchNearbyRoutes:
-                UpdateSearchState();
+                UpdateSearchState(playerCurrentSpeed, dist3DToPlayer);
                 break;
 
             case AIState.Patrol:
-                UpdatePatrolState();
+                UpdatePatrolState(playerCurrentSpeed, dist3DToPlayer);
                 break;
         }
+    }
+
+    private bool CanJoinActiveChase(float myDistToPlayer)
+    {
+        int closerOrActiveChasers = 0;
+        for (int i = 0; i < AllActiveEnemies.Count; i++)
+        {
+            GoblinEnemy other = AllActiveEnemies[i];
+            if (other == null || other == this || other.IsStunned) continue;
+
+            if (other.currentState == AIState.Chase)
+            {
+                closerOrActiveChasers++;
+            }
+        }
+
+        if (closerOrActiveChasers < maxSimultaneousChasers)
+        {
+            return true;
+        }
+
+        // Si ya hay 2 persiguiendo, solo entra en Chase si está pegado al jugador (< 3.8m)
+        return myDistToPlayer <= 3.8f;
+    }
+
+    private bool IsOutnumberedContainmentActive(float myDistToPlayer)
+    {
+        if (player == null) return false;
+
+        int closerActiveThreats = 0;
+        for (int i = 0; i < AllActiveEnemies.Count; i++)
+        {
+            GoblinEnemy other = AllActiveEnemies[i];
+            if (other == null || other == this || other.IsStunned) continue;
+
+            if (other.currentState == AIState.Chase || other.currentState == AIState.InvestigateLastKnown)
+            {
+                float otherDist = Vector3.Distance(other.transform.position, player.position);
+                if (otherDist < myDistToPlayer)
+                {
+                    closerActiveThreats++;
+                }
+            }
+        }
+
+        return closerActiveThreats >= maxSimultaneousChasers;
+    }
+
+    public void HearExternalNoise(Vector3 noisePosition)
+    {
+        if (IsStunned || isPlayerDying) return;
+        if (MazeGenerator.Instance != null && MazeGenerator.Instance.IsPositionInSafeZone3D(noisePosition, 0.8f)) return;
+
+        lastKnownPlayerPosition = noisePosition;
+        Vector3 dirToNoise = (noisePosition - transform.position);
+        dirToNoise.y = 0f;
+        if (dirToNoise.sqrMagnitude > 0.01f)
+        {
+            lastSeenPlayerMoveDir = dirToNoise.normalized;
+        }
+
+        EnterInvestigateLastKnownState();
     }
 
     private bool CanPerceivePlayer(float playerSpeed, bool playerProtectedInSafeZone, out Vector3 sensedPos)
@@ -324,11 +489,18 @@ public class GoblinEnemy : MonoBehaviour
         }
     }
 
-    private void UpdateChaseState(bool playerInSafeZone)
+    private void UpdateChaseState(bool playerInSafeZone, float distToPlayer)
     {
         if (playerInSafeZone || timeSinceLastSawPlayer > loseSightGraceTime)
         {
             EnterInvestigateLastKnownState();
+            return;
+        }
+
+        // Si ya hay otros 2 enemigos más cerca acosando al jugador, este pasa a flanquear para no encerrarlo entre 3 o 4
+        if (IsOutnumberedContainmentActive(distToPlayer) && distToPlayer > 4.2f)
+        {
+            EnterSearchNearbyRoutesState();
             return;
         }
 
@@ -355,8 +527,15 @@ public class GoblinEnemy : MonoBehaviour
         }
     }
 
-    private void UpdateInvestigateState()
+    private void UpdateInvestigateState(float playerSpeed, float distToPlayer)
     {
+        // Si ya hay 2 atacantes más cercanos y este se acerca demasiado, se desvía a cubrir rutas laterales
+        if (IsOutnumberedContainmentActive(distToPlayer) && distToPlayer <= flankContainmentDistance)
+        {
+            EnterSearchNearbyRoutesState();
+            return;
+        }
+
         float distToLastKnown = Vector2.Distance(
             new Vector2(transform.position.x, transform.position.z),
             new Vector2(currentTargetPosition.x, currentTargetPosition.z)
@@ -368,7 +547,8 @@ public class GoblinEnemy : MonoBehaviour
             return;
         }
 
-        MoveAlongMazeCorridors(currentTargetPosition, investigateSpeed, true);
+        float effectiveSpeed = GetElasticSpeed(investigateSpeed, playerSpeed, distToPlayer);
+        MoveAlongMazeCorridors(currentTargetPosition, effectiveSpeed, true);
     }
 
     private void EnterSearchNearbyRoutesState()
@@ -385,8 +565,8 @@ public class GoblinEnemy : MonoBehaviour
             {
                 Vector3 dirA = (a - transform.position).normalized;
                 Vector3 dirB = (b - transform.position).normalized;
-                float dotA = Vector3.Dot(dirA, lastSeenPlayerMoveDir);
-                float dotB = Vector3.Dot(dirB, lastSeenPlayerMoveDir);
+                float dotA = Vector3.Dot(dirA, lastSeenPlayerMoveDir) - GetCrowdPenaltyAtPoint(a) * 0.5f;
+                float dotB = Vector3.Dot(dirB, lastSeenPlayerMoveDir) - GetCrowdPenaltyAtPoint(b) * 0.5f;
                 return dotB.CompareTo(dotA);
             });
 
@@ -417,7 +597,7 @@ public class GoblinEnemy : MonoBehaviour
         }
     }
 
-    private void UpdateSearchState()
+    private void UpdateSearchState(float playerSpeed, float distToPlayer)
     {
         stateTimer -= Time.deltaTime;
         if (stateTimer <= 0f)
@@ -436,7 +616,8 @@ public class GoblinEnemy : MonoBehaviour
             PickNextSearchBranch();
         }
 
-        MoveAlongMazeCorridors(currentTargetPosition, searchSpeed, true);
+        float effectiveSpeed = GetElasticSpeed(searchSpeed, playerSpeed, distToPlayer);
+        MoveAlongMazeCorridors(currentTargetPosition, effectiveSpeed, true);
     }
 
     public void EnterPatrolState()
@@ -453,28 +634,146 @@ public class GoblinEnemy : MonoBehaviour
 
     private void PickNewPatrolDestination()
     {
-        if (MazeGenerator.Instance != null)
+        if (MazeGenerator.Instance == null) return;
+
+        if (player == null)
         {
-            // Elige intersecciones en un anillo táctico de 8 a 22 metros alrededor de la región donde se mueve el jugador
-            // Así nunca se queda patrullando esquinas vacías a 80 metros donde el jugador ya no está
-            currentTargetPosition = MazeGenerator.Instance.GetTacticalPatrolPointNearPlayer(transform.position, 8f, 22f);
+            currentTargetPosition = MazeGenerator.Instance.GetTacticalPatrolPointNearPlayer(transform.position, 8f, 20f);
             pathUpdateTimer = 0f;
+            return;
         }
+
+        // Configurar distancias según el arquetipo Pac-Man
+        float minD = 8f;
+        float maxD = 20f;
+        switch (archetype)
+        {
+            case HunterArchetype.Ambusher:        minD = 9f;  maxD = 18f; break;
+            case HunterArchetype.Stalker:         minD = 7f;  maxD = 14f; break;
+            case HunterArchetype.RouteSentinel:   minD = 10f; maxD = 20f; break;
+            case HunterArchetype.AcousticProwler: minD = 12f; maxD = 22f; break;
+        }
+
+        Vector3 pPos = player.position;
+        Vector3 pForward = player.forward;
+        pForward.y = 0f;
+        if (pForward.sqrMagnitude < 0.001f) pForward = Vector3.forward;
+        pForward.Normalize();
+
+        Vector3 bestCandidate = Vector3.zero;
+        float bestScore = -9999f;
+
+        // Muestreamos 6 puntos válidos del laberinto y elegimos el que mejor cumpla el rol Pac-Man y esté lejos de otros enemigos
+        for (int i = 0; i < 6; i++)
+        {
+            Vector3 candidate = MazeGenerator.Instance.GetTacticalPatrolPointNearPlayer(transform.position, minD, maxD);
+            Vector3 toCandidate = candidate - pPos;
+            toCandidate.y = 0f;
+            float distFromPlayer = toCandidate.magnitude;
+            Vector3 dirFromPlayer = distFromPlayer > 0.01f ? toCandidate / distFromPlayer : pForward;
+
+            float forwardDot = Vector3.Dot(pForward, dirFromPlayer);
+            float roleScore = 0f;
+
+            switch (archetype)
+            {
+                case HunterArchetype.Ambusher:
+                    // Pinky: premia fuertemente los pasillos situados frente al avance del jugador
+                    roleScore = forwardDot * 2.2f;
+                    break;
+
+                case HunterArchetype.Stalker:
+                    // Blinky: premia estar cerca del jugador presionando constantemente
+                    roleScore = (1f - Mathf.Clamp01(distFromPlayer / 20f)) * 1.8f;
+                    break;
+
+                case HunterArchetype.RouteSentinel:
+                    // Inky: premia ángulos laterales/diagonales (dot cercano a 0.35) para cortar cruces
+                    roleScore = (1f - Mathf.Abs(forwardDot - 0.35f)) * 1.6f;
+                    break;
+
+                case HunterArchetype.AcousticProwler:
+                    // Clyde: premia flancos amplios o retaguardia para rodear
+                    roleScore = -forwardDot * 0.8f + (distFromPlayer / 22f);
+                    break;
+            }
+
+            // Penalizar si otro enemigo ya está cerca o yendo hacia ese mismo punto (evita que anden juntos)
+            float crowdPenalty = GetCrowdPenaltyAtPoint(candidate);
+            float totalScore = roleScore - crowdPenalty + Random.Range(-0.15f, 0.15f);
+
+            if (totalScore > bestScore)
+            {
+                bestScore = totalScore;
+                bestCandidate = candidate;
+            }
+        }
+
+        currentTargetPosition = bestCandidate;
+        pathUpdateTimer = 0f;
     }
 
-    private void UpdatePatrolState()
+    private float GetCrowdPenaltyAtPoint(Vector3 point)
+    {
+        float penalty = 0f;
+        for (int i = 0; i < AllActiveEnemies.Count; i++)
+        {
+            GoblinEnemy other = AllActiveEnemies[i];
+            if (other == null || other == this) continue;
+
+            float distToOtherPos = Vector3.Distance(point, other.transform.position);
+            if (distToOtherPos < 7.5f)
+            {
+                penalty += (7.5f - distToOtherPos) * 0.45f;
+            }
+
+            float distToOtherTarget = Vector3.Distance(point, other.currentTargetPosition);
+            if (distToOtherTarget < 7.5f)
+            {
+                penalty += (7.5f - distToOtherTarget) * 0.35f;
+            }
+        }
+        return penalty;
+    }
+
+    private void UpdatePatrolState(float playerSpeed, float distToPlayer)
     {
         float distToPatrolTarget = Vector2.Distance(
             new Vector2(transform.position.x, transform.position.z),
             new Vector2(currentTargetPosition.x, currentTargetPosition.z)
         );
 
+        // Si es el Emboscador (Pinky) y quedó detrás del jugador mientras el jugador corre, recalcula destino hacia adelante
+        if (archetype == HunterArchetype.Ambusher && player != null && playerSpeed > 3.5f)
+        {
+            Vector3 toEnemy = (transform.position - player.position).normalized;
+            if (Vector3.Dot(player.forward, toEnemy) < -0.35f && distToPatrolTarget < 4.5f)
+            {
+                PickNewPatrolDestination();
+            }
+        }
+
         if (distToPatrolTarget <= 0.9f)
         {
             PickNewPatrolDestination();
         }
 
-        MoveAlongMazeCorridors(currentTargetPosition, patrolSpeed, true);
+        float effectiveSpeed = GetElasticSpeed(patrolSpeed, playerSpeed, distToPlayer);
+        MoveAlongMazeCorridors(currentTargetPosition, effectiveSpeed, true);
+    }
+
+    private float GetElasticSpeed(float baseStateSpeed, float playerSpeed, float distToPlayer)
+    {
+        if (MazeGenerator.Instance == null || player == null) return baseStateSpeed;
+
+        // Solo acelerar cuando el jugador NO tiene línea de visión directa con este enemigo
+        bool hasLOS = MazeGenerator.Instance.HasCorridorLineOfSight(transform.position, player.position);
+        if (!hasLOS && (distToPlayer > 11.5f || playerSpeed > 4.0f))
+        {
+            return baseStateSpeed * offScreenCatchUpMultiplier;
+        }
+
+        return baseStateSpeed;
     }
 
     private void MoveAlongMazeCorridors(Vector3 destination, float speed, bool avoidSafeZone)
@@ -558,21 +857,71 @@ public class GoblinEnemy : MonoBehaviour
     {
         if (isPlayerDying) return;
 
+        float finalDuration = customDuration > 0f ? customDuration : stunDuration;
+        ApplyStunInternal(finalDuration, true);
+
+        // Onda expansiva: si había otro enemigo pegado bloqueando el mismo pasillo, también se aturde brevemente
+        for (int i = 0; i < AllActiveEnemies.Count; i++)
+        {
+            GoblinEnemy other = AllActiveEnemies[i];
+            if (other == null || other == this || other.IsStunned) continue;
+
+            float distToOther = Vector3.Distance(transform.position, other.transform.position);
+            if (distToOther <= splashStunRadius)
+            {
+                other.ApplyStunInternal(finalDuration * 0.65f, true);
+            }
+        }
+    }
+
+    private void ApplyStunInternal(float duration, bool applyKnockback)
+    {
         currentState = AIState.Stunned;
-        stunTimer = customDuration > 0f ? customDuration : stunDuration;
+        stunTimer = duration;
+        slipThroughProtectionTimer = Mathf.Max(slipThroughProtectionTimer, 0.65f);
 
         if (bodyCollider != null) bodyCollider.isTrigger = true;
-        if (eerieLight != null) eerieLight.color = new Color(0.2f, 0.9f, 1f, 1f);
+        if (eerieLight != null)
+        {
+            eerieLight.color = new Color(0.2f, 0.9f, 1f, 1f);
+            eerieLight.intensity = 1.6f;
+        }
 
         if (monsterAmbientSource != null && monsterAmbientSource.isPlaying)
         {
             monsterAmbientSource.Pause();
+        }
+
+        // Empuje físico (Knockback) hacia atrás respecto al jugador sin atravesar muros
+        if (applyKnockback && player != null && stunKnockbackDistance > 0.05f)
+        {
+            Vector3 pushDir = transform.position - player.position;
+            pushDir.y = 0f;
+            if (pushDir.sqrMagnitude > 0.001f)
+            {
+                pushDir.Normalize();
+                Vector3 rayOrigin = transform.position + Vector3.up * 0.6f;
+                float safePushDist = stunKnockbackDistance;
+
+                if (Physics.Raycast(rayOrigin, pushDir, out RaycastHit hit, stunKnockbackDistance + 0.4f))
+                {
+                    safePushDist = Mathf.Max(0f, hit.distance - 0.45f);
+                }
+
+                Vector3 knockedPos = transform.position + pushDir * safePushDist;
+                if (MazeGenerator.Instance == null || !MazeGenerator.Instance.IsPositionInSafeZone3D(knockedPos, 0.4f))
+                {
+                    transform.position = knockedPos;
+                }
+            }
         }
     }
 
     private void RecoverFromStun()
     {
         if (bodyCollider != null) bodyCollider.isTrigger = false;
+
+        postStunGraceTimer = 0.85f;
 
         Vector3 euler = transform.eulerAngles;
         transform.rotation = Quaternion.Euler(0f, euler.y, 0f);
