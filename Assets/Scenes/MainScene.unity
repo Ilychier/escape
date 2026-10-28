@@ -1492,11 +1492,11 @@ MonoBehaviour:
   - {fileID: 1264443996888144, guid: e57ff2a222c0ed44ea41cc22b40f0b81, type: 3}
   playerTransform: {fileID: 1973995886}
   initialSpawnDelay: 10
-  maxActiveGoblins: 3
+  maxActiveGoblins: 4
   spawnInterval: 5
   minSpawnDistanceFromPlayer: 10
   maxSpawnDistanceFromPlayer: 18
-  maxPatrolLeashDistance: 24
+  maxPatrolLeashDistance: 22
   goblinChaseSpeed: 3.5
   goblinStunDuration: 3
   searchDurationAfterLosingSight: 7.5
@@ -8956,11 +8956,14 @@ MonoBehaviour:
   gravityMultiplier: 2.5
   rockScale: 0.22
   throwCooldown: 2.5
+  rockStunRadius: 1.65
+  decoyNoiseRadius: 15
   maxTrajectoryDots: 28
   timeStepBetweenDots: 0.055
   dotBaseSize: 0.04
   arcColor: {r: 0.7264151, g: 0.09045773, b: 0, a: 0.9}
   impactPointColor: {r: 0.23584908, g: 0.0034841248, b: 0.0011124983, a: 1}
+  stunTargetLockColor: {r: 0.2, g: 0.95, b: 1, a: 1}
   throwRockSfx: {fileID: 8300000, guid: c1831f8bc340b584d9ad7777c7082c13, type: 3}
   throwSfxVolume: 0.85
 --- !u!114 &1973995890
